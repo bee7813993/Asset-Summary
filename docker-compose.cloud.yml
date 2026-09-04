@@ -1,0 +1,128 @@
+# クラウド VM 用の統合スタック（named volume + Google OAuth + caddy TLS）。
+#
+#   docker compose -f docker-compose.cloud.yml up -d --build
+#   docker compose -f docker-compose.cloud.yml --profile syncthing up -d   # Syncthing 込み
+#
+# 前提:
+# - AS と CS が兄弟ディレクトリに clone されている（または .env の CS_CONTEXT で指定）。
+# - .env に CS_SERVICE_TOKEN / 公開URL / Google OAuth / AS_ALLOWED_EMAILS を設定。
+# - DNS で AS_HOST / CS_HOST が VM を指しており、80/443 が開いている
+#   （caddy が Let's Encrypt で自動的に TLS 証明書を取得する）。
+# - Google OAuth クライアントのリダイレクト URI に
+#   ${AS_PUBLIC_URL}/auth/callback と ${CS_PUBLIC_URL}/auth/callback の両方を登録。
+#
+# アプリのポートは既定でループバックにのみ publish する（外へは caddy 経由）。
+# caddy を使わず直接公開したい場合のみ BIND_ADDR=0.0.0.0 にする
+# （http になるので OAuth の Secure Cookie 要件に注意）。
+
+name: asset-stack
+
+services:
+  asset-summary:
+    build: .
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:8010:8010"
+    volumes:
+      - as-data:/data
+    environment:
+      - AS_DB_PATH=/data/assets.db
+      # 取込の as_of と前日比の「前日」を決める暦。使う人の時間帯に合わせる
+      # （ローカル compose と同じ。UTC のままだと朝の取込が前日付になる）
+      - TZ=${TZ:-Asia/Tokyo}
+      - CS_BASE_URL=http://crypto-summary:8000
+      - "CS_PUBLIC_URL=${CS_PUBLIC_URL:?例 https://cs.example.com}"
+      - "CS_SERVICE_TOKEN=${CS_SERVICE_TOKEN:?AS-CS 間のサービストークンを設定してください}"
+      # ログインゲート（Google OAuth + メール許可リスト）
+      - "AS_BASE_URL=${AS_PUBLIC_URL:?例 https://as.example.com}"
+      - "AS_ALLOWED_EMAILS=${AS_ALLOWED_EMAILS:?ログインを許可する Google メールを設定してください}"
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      - AS_SECRET_KEY=${AS_SECRET_KEY:-}
+      - AS_ALLOWED_ORIGINS=${AS_ALLOWED_ORIGINS:-}
+      # MF PDF の受信フォルダ（自動取込）。既定は /data/inbox だが named volume の
+      # 中なのでホストから直接は置けない（docker compose cp か Web UI の取込を使う）。
+      # 使わないなら off。
+      - AS_MF_INBOX_DIR=${AS_MF_INBOX_DIR:-}
+      - AS_MF_INBOX_POLL=${AS_MF_INBOX_POLL:-}
+    depends_on:
+      - crypto-summary
+    restart: unless-stopped
+
+  crypto-summary:
+    build: ${CS_CONTEXT:-../Crypto-Summary}
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:8000:8000"
+    volumes:
+      - cs-data:/data
+      - pbr-outputs:/data/pbr-outputs:ro
+    environment:
+      # 公開デプロイなのでマルチユーザー（Google ログイン必須）に固定する。
+      # CS 単体の compose は DATA_DIR を空にしてログイン無しにもできるが、
+      # 公開 URL でそれをやると台帳が誰でも読めるため、ここでは許さない。
+      - DATA_DIR=/data
+      # AS と同じ暦にしておく
+      - TZ=${TZ:-Asia/Tokyo}
+      - HOME=/data
+      - "BASE_URL=${CS_PUBLIC_URL:?例 https://cs.example.com}"
+      - "CS_SERVICE_TOKEN=${CS_SERVICE_TOKEN:?}"
+      - SECRET_KEY=${SECRET_KEY:-}
+      # 公開デプロイでは OAuth と暗号鍵を env で必須にする。
+      # 未設定のまま公開すると、CS の無認証の初回セットアップ API (/api/setup) が
+      # 誰でも叩ける状態になり、先着の第三者が管理者設定を乗っ取れるため。
+      - "GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:?Google OAuth クライアントIDを設定してください}"
+      - "GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:?}"
+      - "CS_SECRET_KEY=${CS_SECRET_KEY:?crypto-summary account gen-key で生成した鍵を設定してください}"
+      - ADMIN_EMAILS=${ADMIN_EMAILS:-}
+      - COINGECKO_API_KEY=${COINGECKO_API_KEY:-}
+      - PBR_CRAWL_DIR=/data/pbr-outputs
+      - SYNCTHING_URL=${SYNCTHING_URL:-}
+      - SYNCTHING_API_KEY=${SYNCTHING_API_KEY:-}
+      - PBR_VIEWER_URL=${PBR_VIEWER_URL:-}
+    restart: unless-stopped
+
+  # TLS 終端（2 サブドメインを各アプリへ振り分け）。証明書は自動取得・自動更新。
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    environment:
+      - "AS_HOST=${AS_HOST:?例 as.example.com（AS_PUBLIC_URL のホスト名）}"
+      - "CS_HOST=${CS_HOST:?例 cs.example.com（CS_PUBLIC_URL のホスト名）}"
+    restart: unless-stopped
+
+  # 手元の PBR クローラー outputs を受け取る同期先（任意 --profile syncthing）。
+  # 使う場合は .env に SYNCTHING_API_KEY と SYNCTHING_URL=http://syncthing:8384 を
+  # 設定すること。手順は CS リポジトリの docs/syncthing-pairing.md を参照。
+  # （profile 無効時にも compose が変数を評価するため :? は使わない）
+  syncthing:
+    image: syncthing/syncthing:latest
+    profiles: ["syncthing"]
+    # 注意: hostname を "crypto-summary" にしてはいけない — Docker 内蔵 DNS に
+    # 登録され、crypto-summary サービス名と A レコードが衝突して AS→CS 接続が
+    # 間欠的に syncthing へ向かう。デバイス表示名は Syncthing の設定で変えられる。
+    hostname: cs-syncthing
+    environment:
+      - STGUIAPIKEY=${SYNCTHING_API_KEY:-}
+      - PUID=0
+      - PGID=0
+    volumes:
+      - syncthing-config:/var/syncthing
+      - pbr-outputs:/data/pbr-outputs
+    ports:
+      - "22000:22000/tcp"
+      - "22000:22000/udp"
+      - "21027:21027/udp"
+    restart: unless-stopped
+
+volumes:
+  as-data:
+  cs-data:
+  pbr-outputs:
+  syncthing-config:
+  caddy-data:
+  caddy-config:

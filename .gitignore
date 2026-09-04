@@ -1,0 +1,47 @@
+# ---- personal financial data (NEVER commit) ----
+data/
+*.pdf
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.secrets.json
+out/
+
+# ---- python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# ---- env ----
+.env
+.env.*
+!.env.example
+
+# ---- IDE / OS ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ---- tooling ----
+.pytest_cache/
+htmlcov/
+.coverage
+.claude/
+
+# --- 取りこぼし防止 ---
+# .env_ のような変種は .env / .env.* のどちらにも当たらない。
+.env*
+!.env.example
+# リポジトリ直下に置いた取引所エクスポートや作業ファイル。
+/*.csv
+/*.tsv
+/*.xlsx
+*.accounts.json
+debug_*.py
+.playwright-mcp/

@@ -1,0 +1,31 @@
+# 個人データ・秘密情報はイメージに絶対入れない
+data/
+*.pdf
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.secrets.json
+.env
+.env.*
+
+# ビルドに不要なもの
+.git/
+.claude/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+tests/
+.pytest_cache/
+htmlcov/
+.coverage
+.vscode/
+.idea/
+docs/
+deploy/
+docker-compose*.yml
+Dockerfile

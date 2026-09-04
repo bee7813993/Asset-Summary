@@ -1,0 +1,120 @@
+# 統合スタック（ローカル開発用）: asset-summary(8010) + crypto-summary(8000)
+#
+#   docker compose up -d --build
+#
+# 前提: .env に Crypto-Summary リポジトリの場所を書く。
+#   例: CS_CONTEXT=C:/path/to/Crypto-Summary
+#   VM で兄弟ディレクトリに clone した場合は既定値 ../Crypto-Summary のままでよい。
+#
+# 注意:
+# - Crypto-Summary を単独 compose で起動中ならポート 8000 が衝突する。
+#   先に (cd $CS_CONTEXT && docker compose down) しておくこと。
+# - PBR Lending クローラー連携は crypto-summary サービスから設定できる
+#   （env は常時素通し、outputs のマウントは既定コメントアウト）。ただし
+#   クローラー自体の起動はこのスタックの範囲外 — PBR リポジトリ側の compose を
+#   単独で起動する（CS リポジトリ側 compose の include 例も参照）。
+# - ポートは既定でループバック（127.0.0.1）にのみ publish する。手元以外
+#   （LAN の別端末・ポート転送の先）から開くには .env で BIND_ADDR=0.0.0.0。
+#   その場合は AS_ALLOWED_EMAILS も必ず設定すること — 空のままだと AS は
+#   認証なしで全 API を開く。Docker の publish は Linux では UFW 等も素通りする。
+
+name: asset-stack
+
+services:
+  asset-summary:
+    build: .
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:8010:8010"
+    volumes:
+      # リポジトリ既定の data/（gitignore 済み）をそのまま使う。
+      # docker なし運用（asset-summary web）と同じ DB ファイルを共有する
+      # （同時に両方を起動しないこと）。
+      - ./data:/data
+    environment:
+      - AS_DB_PATH=/data/assets.db
+      # コンテナの暦。スナップショットの as_of（自動取込は PDF の更新時刻の
+      # 日付）と前日比の「前日」がこれで決まるので、使う人の時間帯に合わせる。
+      # UTC のままだと、朝に取り込んだぶんが前日の日付で入り、前日比が
+      # UTC 日付をまたいだ時点で 0 に戻ってしまう。
+      - TZ=${TZ:-Asia/Tokyo}
+      # CS への server-to-server 接続（compose 内部 DNS でサービス名解決）
+      - CS_BASE_URL=http://crypto-summary:8000
+      # ブラウザから開くリンク先（内部 DNS 名はブラウザから引けない）。
+      # ホスト名は localhost にする — CS の Google OAuth リダイレクト URI が
+      # http://localhost:8000/auth/callback で登録されており、127.0.0.1 で開くと
+      # 別ホスト扱いになってログインできないため。
+      - CS_PUBLIC_URL=${CS_PUBLIC_URL:-http://localhost:8000}
+      - CS_SERVICE_TOKEN=${CS_SERVICE_TOKEN:-}
+      # CS がマルチユーザーの場合に読む台帳の Google sub（AS 認証オフ時用）
+      - CS_USER_SUB=${CS_USER_SUB:-}
+      # ログインゲート。AS_ALLOWED_EMAILS を書いたときだけ有効になり、未設定なら
+      # 従来どおり認証なし。ポート転送などで手元以外から開くなら必ず設定すること
+      # （AS には CS のような初回セットアップ画面が無いので、OAuth の資格情報も
+      # ここから渡す。CS と同じクライアントを使い、リダイレクト URI に
+      # ${AS_PUBLIC_URL}/auth/callback を追加登録する）。
+      # 同上。空ならアプリ側の既定（http://localhost:8010）が使われる。
+      - AS_BASE_URL=${AS_PUBLIC_URL:-}
+      - AS_ALLOWED_EMAILS=${AS_ALLOWED_EMAILS:-}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      - AS_SECRET_KEY=${AS_SECRET_KEY:-}
+      # サブパス配信の接頭辞（例 /asset）。未設定なら AS_PUBLIC_URL の
+      # パス部分から決まるので、通常は書かなくてよい。
+      - AS_ROOT_PATH=${AS_ROOT_PATH:-}
+      # MF PDF の受信フォルダ（自動取込）。空なら既定の /data/inbox
+      # （= ホストの ./data/inbox）。off で機能を無効化。
+      - AS_MF_INBOX_DIR=${AS_MF_INBOX_DIR:-}
+      - AS_MF_INBOX_POLL=${AS_MF_INBOX_POLL:-}
+    depends_on:
+      # 起動順のためだけ。service_healthy 条件は付けない —
+      # CS 停止中でも AS は起動し、CS 由来データは warnings として扱う設計。
+      - crypto-summary
+    restart: unless-stopped
+
+  crypto-summary:
+    build: ${CS_CONTEXT:-../Crypto-Summary}
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:8000:8000"
+    volumes:
+      # CS リポジトリ側の既存 data/ を使い回す（CS 単独 compose と同じ場所）
+      - ${CS_CONTEXT:-../Crypto-Summary}/data:/data
+      # PBR Lending クローラーの出力（読み取り専用）。連携する場合だけ次の行を
+      # 有効化し、.env に PBR_REPO_DIR（クローラーのリポジトリ）と
+      # PBR_CRAWL_DIR=/pbr-outputs を書く。PBR_REPO_DIR が空のまま有効に
+      # すると compose がパスを解決できず起動できないため、既定は無効。
+      # - "${PBR_REPO_DIR}/outputs:/pbr-outputs:ro"
+    environment:
+      # ログインの有無を決める（CS 本体の compose と同じ書き方）。
+      #   DATA_DIR=/data  → マルチユーザー（Google ログイン必須）。AS からは
+      #                     CS_SERVICE_TOKEN + CS_USER_SUB で読む。
+      #   DATA_DIR=（空） → シングルユーザー（ログイン無し）。手元で試すだけなら
+      #                     こちらが簡単で、トークンも CS_USER_SUB も不要。
+      # `-` は `:-` と違い「未設定のときだけ既定値」なので、明示した空を潰さない。
+      - DATA_DIR=${DATA_DIR-/data}
+      # AS と同じ暦にしておく（日次残高の当日ぶんの切れ目が揃う）
+      - TZ=${TZ:-Asia/Tokyo}
+      # シングルユーザー時の DB。ボリューム上に置く（既定の ledger.db だと
+      # イメージ内に書かれてコンテナ作り直しで消える）。
+      - DB_PATH=${DB_PATH:-/data/ledger.db}
+      # 価格・アイコンキャッシュ（~/.crypto_summary_*.json）をボリュームに載せる
+      - HOME=/data
+      - CS_SERVICE_TOKEN=${CS_SERVICE_TOKEN:-}
+      - SECRET_KEY=${SECRET_KEY:-}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      - CS_SECRET_KEY=${CS_SECRET_KEY:-}
+      - ADMIN_EMAILS=${ADMIN_EMAILS:-}
+      # OAuth リダイレクト URI の組み立て元。既定値を入れない — 空で渡すと
+      # Crypto-Summary は自分の _server_config.json（初回セットアップ画面で
+      # 設定した値）を使う。ここで固定値を渡すとその設定を握り潰してしまう。
+      # 統合スタック側から上書きしたいときだけ .env の CS_PUBLIC_URL を書く。
+      - BASE_URL=${CS_PUBLIC_URL:-}
+      - COINGECKO_API_KEY=${COINGECKO_API_KEY:-}
+      # PBR Lending クローラー連携（上の volume を有効にした場合）。
+      # CS は空文字を「未設定」として扱うので、使わない環境では挙動不変。
+      - PBR_CRAWL_DIR=${PBR_CRAWL_DIR:-}
+      - PBR_VIEWER_URL=${PBR_VIEWER_URL:-}
+      # ファイル同期の相手登録（Syncthing）。空なら機能ごと無効。
+      - SYNCTHING_URL=${SYNCTHING_URL:-}
+      - SYNCTHING_API_KEY=${SYNCTHING_API_KEY:-}
+    restart: unless-stopped

@@ -1,0 +1,5 @@
+# 起動スクリプトの改行コードを固定する。
+# start.sh が CRLF で checkout されると Linux で `bad interpreter` になり、
+# start.ps1 は Windows PowerShell 5.1 が CRLF + BOM を前提に読む。
+*.sh text eol=lf
+*.ps1 text eol=crlf

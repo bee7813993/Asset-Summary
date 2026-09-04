@@ -1,0 +1,1488 @@
+/* Asset Summary — Crypto-Summary と同一パレット（将来統合時の見た目統一のため変更しない） */
+:root {
+  --bg: #0d1117;
+  --bg-card: #161b22;
+  --bg-elev: #1c2230;
+  --border: #2a3340;
+  --text: #e6edf3;
+  --text-dim: #8b949e;
+  --accent: #2f81f7;
+  --green: #3fb950;
+  --red: #f85149;
+  --radius: 12px;
+  --sidebar-w: 220px;
+}
+
+html.light {
+  --bg: #f6f8fa;
+  --bg-card: #ffffff;
+  --bg-elev: #eaeef2;
+  --border: #d0d7de;
+  --text: #24292f;
+  --text-dim: #57606a;
+  --accent: #0969da;
+  --green: #1a7f37;
+  --red: #cf222e;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.5;
+  height: 100vh;
+  height: 100dvh; /* iOS Safari: アドレスバー分を除いた実際の表示領域 */
+  overflow: hidden;
+}
+
+/* ---- Layout ---- */
+.layout {
+  display: flex;
+  height: 100vh;
+  height: 100dvh;
+}
+
+/* ---- Sidebar ---- */
+.sidebar {
+  width: var(--sidebar-w);
+  min-width: var(--sidebar-w);
+  background: var(--bg-card);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  padding: 20px 12px;
+  gap: 8px;
+  overflow: hidden;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 8px 16px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 4px;
+}
+.brand .logo { color: var(--accent); font-size: 22px; }
+.brand-name { font-size: 15px; font-weight: 600; letter-spacing: .3px; }
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.nav-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border-radius: 8px;
+  color: var(--text-dim);
+  text-decoration: none;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background .15s;
+}
+.nav-link:hover { background: var(--bg-elev); color: var(--text); }
+.nav-link.active { background: var(--bg-elev); color: var(--text); }
+.nav-icon { font-size: 16px; width: 20px; text-align: center; }
+
+.sidebar-controls {
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.sidebar-controls label { font-size: 12px; color: var(--text-dim); }
+.controls-row { display: flex; gap: 6px; align-items: center; }
+.controls-row-icons { gap: 4px; }
+
+select, button {
+  background: var(--bg-elev); color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 6px 10px; font-size: 14px; cursor: pointer;
+}
+button:hover, select:hover { border-color: var(--accent); }
+select { flex: 1; }
+#refresh { font-size: 16px; line-height: 1; padding: 6px 8px; }
+#refresh.spin { animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---- Main content ---- */
+.main-content {
+  flex: 1;
+  min-width: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 28px;
+}
+
+.page { display: block; }
+.page.hidden { display: none; }
+
+.page-title {
+  font-size: 20px;
+  font-weight: 600;
+  margin-bottom: 20px;
+  color: var(--text);
+}
+
+/* ---- Hero ---- */
+.hero {
+  background: linear-gradient(135deg, #161b22, #1c2941);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 24px;
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.hero-left { display: flex; flex-direction: column; gap: 2px; }
+.hero-label { color: var(--text-dim); font-size: 12px; white-space: nowrap; }
+.hero-main { display: flex; align-items: baseline; gap: 10px; }
+.hero-value { font-size: 28px; font-weight: 700; letter-spacing: .3px; }
+.hero-jpy { font-size: 13px; color: var(--text-dim); letter-spacing: .2px; }
+.hero-pl { font-size: 15px; font-weight: 600; letter-spacing: .2px; min-height: 1em; }
+.hero-note { font-size: 11px; color: var(--text-dim); }
+/* ヒーローの前日比。損益(.hero-pl)より一段小さくして主従を付ける */
+.hero-day { font-size: 13px; font-weight: 600; letter-spacing: .2px; min-height: 1em; }
+.hero-day .hero-day-label { color: var(--text-dim); font-weight: 500; margin-right: 6px; }
+.hero-sub { color: var(--text-dim); font-size: 12px; margin-left: auto; white-space: nowrap; }
+
+/* ---- 損益カラー ---- */
+.pl-pos { color: var(--green); }
+.pl-neg { color: var(--red); }
+
+/* ---- クラス色バッジ ---- */
+.class-badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .3px;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+/* ---- Grid ---- */
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  margin-bottom: 20px;
+}
+@media (max-width: 640px) {
+  .grid { grid-template-columns: 1fr; }
+}
+.grid > * { min-width: 0; }
+
+/* ---- Cards ---- */
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  margin-bottom: 20px;
+}
+.card:last-child { margin-bottom: 0; }
+.card h2 { font-size: 15px; font-weight: 600; margin-bottom: 14px; color: var(--text); }
+.card-hint { font-size: 12px; color: var(--text-dim); margin: -8px 0 14px; }
+.card-footer { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); text-align: right; }
+.card-link { background: none; border: none; color: var(--accent); font-size: 13px; cursor: pointer; padding: 4px 2px; }
+.card-link:hover { text-decoration: underline; border: none; }
+
+/* ---- ダッシュボードのウィジェット配置 ----
+   JS が「相棒のいる半幅ウィジェット」だけを1カラム分に、それ以外を全幅
+   （span-2）に割り当てる。カードが1枚だけのグリッドが半分幅で止まるのを防ぐ。
+
+   カラム数は auto-fit で「実際に入る幅があるときだけ2列」にする。ビューポート幅の
+   メディアクエリだと、固定幅サイドバー・ブラウザ拡大・列の追加ぶんがずれて、
+   半幅カードの中の表が潰れる（ドーナツの右の表が隠れる）。--dash-min-col は
+   一番広い半幅ウィジェット（主な口座＝口座/銘柄数/評価額/前日比/評価損益/損益率/構成比）が
+   横スクロールせずに収まる幅。min(…, 100%) は、これより狭い画面で
+   はみ出さないようにするため。 */
+#dash-widgets {
+  --dash-min-col: 620px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(var(--dash-min-col), 100%), 1fr));
+  gap: 20px;
+  align-items: start;
+  margin-bottom: 20px;
+}
+/* ウィジェットはグリッドの子として直接並ぶ（ラッパーで二重グリッドにしない） */
+#dash-widgets > .card { margin-bottom: 0; }
+#dash-widgets > .span-2 { grid-column: 1 / -1; }
+#dash-widgets > * { min-width: 0; }
+
+/* ---- ドーナツチャートカード ---- */
+.dash-cards { margin-bottom: 20px; }
+.chart-card {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  grid-template-rows: auto 1fr;
+  column-gap: 28px;
+}
+/* 全幅で表示するチャートカードはドーナツも大きくする */
+#dash-widgets > .span-2 .chart-card { grid-template-columns: 300px 1fr; }
+#dash-widgets > .span-2 .chart-wrap { height: 372px; }
+.chart-card h2 { grid-column: 1 / -1; margin-bottom: 8px; }
+/* 高さは輪の直径＋上下のラベル帯。チャート列は表の高さぶん余っているので、
+   横幅（＝表の幅）を削らずにスライスの外側ラベルを置ける（app.js の
+   _donutPadding が縦長のとき上下に余白を作る） */
+.chart-wrap {
+  position: relative; height: 300px; width: 100%; min-width: 0;
+  display: flex; align-items: center; justify-content: center;
+  align-self: start; margin: 8px auto 0;
+}
+.chart-card-detail { overflow: auto; display: flex; flex-direction: column; min-width: 0; }
+.chart-card-detail .card-footer { margin-top: auto; padding-top: 8px; }
+/* スマホ（横持ち含む）は縦積み（ベースの .chart-card より後に書くこと）。
+   縦積みではカードの横幅を丸ごと使えるので、枠を高くして輪を大きくする
+   （外側ラベルは輪の上下に置くので、横幅はラベルに取られない）。高さは固定px:
+   %やaspect-ratioだと Chart.js が canvas を測る時点で高さが確定しない。
+   720px はスマホ横（〜667px）で横並びにするとドーナツの右の表が潰れる
+   （構成比列が切れる）のを防ぐ境界。 */
+@media (max-width: 720px) {
+  .chart-card { grid-template-columns: 1fr; }
+  .chart-card h2 { margin-bottom: 4px; }
+  /* min-width:0 が要る: グリッド項目の既定 min-width:auto だと、canvas の
+     既定幅（300px）が列の下限になってカードからはみ出す */
+  .chart-wrap,
+  #dash-widgets > .span-2 .chart-wrap {
+    margin: 0 auto 16px;
+    width: 100%;
+    min-width: 0;
+    height: 340px;
+  }
+  .chart-wrap canvas { max-width: 100%; }
+}
+
+/* ---- Tables ---- */
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th, td { padding: 10px 8px; text-align: left; border-bottom: 1px solid var(--border); }
+/* 見出しは折り返さない: 幅が足りないと「銘柄数」が1文字ずつ縦に積まれるため。
+   幅が本当に足りないテーブルは .table-wrap の横スクロールに任せる */
+th { color: var(--text-dim); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: .4px; white-space: nowrap; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+/* 1セルに金額と率を2行で入れる（前日比・計上額）。Yahooファイナンスと同じ見せ方 */
+.cell-stack { display: flex; flex-direction: column; align-items: flex-end; line-height: 1.25; }
+/* 「−19,684円」が「−19,684 / 円」に割れないように。行の割付は金額と%の2行で固定 */
+.cell-stack > span { white-space: nowrap; }
+/* 評価額+バッジの1行目（.value-line）は例外: 金額（.value-num）は折り返さず、
+   バッジ（目安・参考値）だけ狭ければ次の行に落とす */
+.cell-stack > .value-line { white-space: normal; }
+.value-line .value-num { white-space: nowrap; }
+.cell-stack .cell-sub { font-size: 11px; opacity: .85; }
+/* 現在値セルの「現在値（取得単価）」統合表示はカード専用。表では現在値のみ */
+.price-merged { display: none; }
+/* 構成比の見せ方の切替: スマホでは評価額の2行目（.weight-sub）、広い画面では
+   独立した列（.weight-col）。タグ別・資産クラス・口座別で同じ見せ方に揃える。
+   列を4本並べる方式は実機フォントの幅差で右端が切れる端末があるため */
+.weight-sub { display: none; color: var(--text-dim); }
+/* 損益率も同様: 960px以下では評価損益の2行目（.pl-pct-sub）、広い画面では列。
+   保有テーブルの列折りたたみ（960px）と対で切り替える */
+.pl-pct-sub { display: none; }
+@media (max-width: 640px) {
+  th.weight-col, td.weight-col { display: none; }
+  .weight-sub { display: block; }
+}
+@media (max-width: 960px) {
+  .pl-pct-sub { display: block; }
+}
+tbody tr:last-child td { border-bottom: none; }
+tbody tr:hover { background: var(--bg-elev); }
+.asset-name { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.swatch { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+.asset-label { font-weight: 500; }
+/* クラス構成テーブルのクラス名は短いラベルなので途中で折り返さない
+   （狭い画面で「暗号資/産」のように縦に割れるのを防ぐ） */
+#class-table .asset-name { flex-wrap: nowrap; }
+#class-table .asset-label, #pf-class-table td:first-child { white-space: nowrap; }
+.asset-code { font-size: 11px; color: var(--text-dim); font-family: monospace; }
+.muted { color: var(--text-dim); }
+.row-dim td { opacity: .55; }
+.ref-badge {
+  font-size: 10px; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 4px;
+  padding: 0 4px; margin-left: 4px; white-space: nowrap;
+}
+
+/* ---- Crypto-Summary 連携 ---- */
+/* 出所バッジ（暗号資産クラス色 #f7931a はライト/ダーク両テーマで読める） */
+.cs-badge { color: #f7931a; border-color: #f7931a55; }
+/* スマホでは「CS連携」の短い表記に切り替える（app.js の csBadgeHtml と対）。
+   長い表記は折り返せない1語として銘柄列の最小幅の床になり、評価額・前日比を
+   押し出して表が画面幅を超えるため。切替は表示のみ（title の説明文は共通） */
+.cs-badge .cs-badge-short { display: none; }
+@media (max-width: 640px) {
+  .cs-badge .cs-badge-full { display: none; }
+  .cs-badge .cs-badge-short { display: inline; }
+}
+.coin-icon {
+  width: 16px; height: 16px; border-radius: 50%;
+  vertical-align: -3px; flex: none;
+}
+.cs-status { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+.cs-status .muted { font-size: 12px; }
+.cs-dot-ok { color: var(--green); }
+.cs-dot-err { color: #e3b341; }
+.cs-open-btn { display: inline-block; text-decoration: none; }
+.cs-link-btn { margin-left: auto; text-decoration: none; white-space: nowrap; }
+/* 設定の連携カード: 接続先URLは狭い画面では任意の位置で折り返す。
+   直後の注記は h2 直下用の負マージン（.card-hint）を打ち消して重なりを防ぐ */
+#settings-cs-status a { word-break: break-all; }
+#settings-cs-card .card-hint { margin-top: 8px; }
+
+/* ---- 認証 ---- */
+.logout-link {
+  display: block; margin-top: 10px; font-size: 12px;
+  color: var(--text-dim); text-decoration: none;
+  /* モバイルの横並びヘッダーで幅が詰まっても1文字ずつ縦に折れないように */
+  white-space: nowrap;
+}
+.logout-link:hover { color: var(--text); text-decoration: underline; }
+.login-btn { display: inline-block; text-decoration: none; }
+
+/* クリック可能な行 */
+.clickable { cursor: pointer; }
+.clickable:hover td { color: var(--accent); }
+.row-arrow { color: var(--text-dim); float: right; }
+.clickable-cell { cursor: pointer; }
+
+/* ---- Drill-down ---- */
+.detail-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+.back-btn {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 13px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.back-btn:hover { border-color: var(--accent); color: var(--accent); }
+.detail-header .page-title { margin-bottom: 0; }
+
+/* ---- 銘柄詳細メタ行 ---- */
+.security-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: -8px 0 16px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+.security-meta code { font-family: monospace; }
+.security-meta a { color: var(--accent); text-decoration: none; }
+.security-meta a:hover { text-decoration: underline; }
+.unlinked-warn { color: #e3b341; }
+
+/* ---- 統計タイル ---- */
+.stat-tiles {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.stat-tile {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  min-width: 0;
+}
+.stat-label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .3px; margin-bottom: 4px; }
+.stat-value { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 900px) { .stat-tiles { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 640px) { .stat-tiles { grid-template-columns: repeat(2, 1fr); } }
+
+/* ---- Misc ---- */
+.warnings {
+  background: #3a2d00; border: 1px solid #6b5400; color: #f0d77a;
+  border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; font-size: 13px;
+}
+.warnings a { color: inherit; font-weight: 600; }
+.link-btn {
+  background: none; border: none; color: var(--accent);
+  font-size: 13px; cursor: pointer; padding: 6px 10px;
+}
+.link-btn:hover { text-decoration: underline; border: none; }
+.unpriced { margin-top: 12px; font-size: 13px; color: var(--text-dim); }
+.footer { margin-top: 24px; color: var(--text-dim); font-size: 12px; text-align: center; }
+.footer .dot { margin: 0 8px; }
+.hidden { display: none !important; }
+.loading { color: var(--text-dim); padding: 20px; text-align: center; }
+
+/* ---- 空状態ガイド ---- */
+.empty-guide { text-align: center; padding: 40px 20px; }
+.empty-guide-icon { font-size: 40px; color: var(--accent); margin-bottom: 12px; }
+.empty-guide p { color: var(--text-dim); font-size: 14px; margin-bottom: 20px; }
+.empty-guide-actions { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+
+/* ---- Action button ---- */
+.action-btn {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 13px;
+  padding: 6px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.action-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+/* 行内の小ボタン */
+.tx-link-btn {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tx-link-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+/* 削除ボタン（行内） */
+.delete-btn {
+  background: none;
+  border: 1px solid transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+  padding: 3px 7px;
+  border-radius: 5px;
+  cursor: pointer;
+  opacity: .45;
+  line-height: 1;
+}
+.delete-btn:hover { border-color: var(--red); color: var(--red); opacity: 1; }
+
+/* ---- 保有一覧ツールバー（フィルタチップ + 検索） ---- */
+.holdings-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.filter-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.filter-chip {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 12px;
+  padding: 4px 12px;
+  border-radius: 14px;
+  cursor: pointer;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.filter-chip:hover { border-color: var(--accent); color: var(--text); }
+.filter-chip.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.holdings-search { max-width: 260px; margin-left: auto; }
+
+/* ---- 設定パネル ---- */
+.settings-panel {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px 24px;
+  margin-bottom: 20px;
+}
+.settings-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: .4px;
+  margin-bottom: 16px;
+}
+.settings-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+.settings-row-inline { flex-direction: row; align-items: center; }
+.toggle-label {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 14px; cursor: pointer; user-select: none;
+}
+.toggle-label input[type="checkbox"] {
+  accent-color: var(--accent);
+  width: 16px; height: 16px; cursor: pointer;
+}
+.settings-label {
+  font-size: 13px;
+  color: var(--text-dim);
+}
+.settings-input {
+  background: var(--bg-elev);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 14px;
+  max-width: 320px;
+}
+.settings-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.settings-hint {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 4px;
+}
+.settings-save-btn {
+  background: var(--accent);
+  border: none;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  padding: 8px 20px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.settings-save-btn:hover { background: #4a94ff; border: none; }
+.settings-save-btn:disabled { opacity: .5; cursor: not-allowed; }
+.settings-result {
+  margin-top: 10px;
+  font-size: 13px;
+  padding: 6px 12px;
+  border-radius: 6px;
+}
+.settings-result.ok { background: #1a3a28; color: #3fb950; }
+.settings-result.err { background: #3a1a1a; color: #f85149; }
+
+/* ---- フィルタ系入力 ---- */
+.filter-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.filter-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: .3px;
+}
+.filter-date {
+  background: var(--bg-elev);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.filter-date:hover { border-color: var(--accent); }
+.filter-date::-webkit-calendar-picker-indicator { filter: invert(.6); cursor: pointer; }
+
+/* ---- タブ（取込・手動登録で共用） ---- */
+.import-tabs {
+  display: flex;
+  gap: 0;
+  margin: -4px 0 18px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.import-tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  color: var(--text-dim);
+  font-size: 13px;
+  padding: 8px 16px;
+  cursor: pointer;
+  margin-bottom: -1px;
+}
+.import-tab:hover { color: var(--text); border-bottom-color: var(--border); }
+.import-tab.active { color: var(--text); border-bottom-color: var(--accent); }
+
+.manual-add-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  column-gap: 24px;
+}
+@media (max-width: 640px) { .manual-add-grid { grid-template-columns: 1fr; } }
+
+.file-input {
+  background: var(--bg-elev);
+  color: var(--text);
+  border: 1.5px dashed var(--border);
+  border-radius: 8px;
+  padding: 10px 14px;
+  font-size: 13px;
+  cursor: pointer;
+  width: 100%;
+  max-width: 400px;
+}
+.file-input:hover { border-color: var(--accent); }
+
+.import-note {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 16px;
+  font-size: 13px;
+  color: var(--text-dim);
+  margin-bottom: 14px;
+  line-height: 1.7;
+}
+.import-note strong { color: var(--text); }
+.import-note .ok { color: var(--green); }
+.import-note .ng { color: #e3b341; }
+
+/* 解析できなかった行（既定は畳んでおく。開くとPDFの原文をそのまま出す） */
+.import-unparsed { margin-top: 8px; }
+.import-unparsed summary {
+  cursor: pointer;
+  color: #e3b341;
+  width: fit-content;
+}
+.import-unparsed .unparsed-hint { margin: 6px 0 4px; }
+.import-unparsed ul {
+  margin: 0;
+  padding-left: 18px;
+  max-height: 220px;
+  overflow: auto;
+}
+.import-unparsed li {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: var(--text);
+  word-break: break-all;
+  margin: 2px 0;
+}
+.import-unparsed .unparsed-page {
+  color: var(--text-dim);
+  margin-right: 8px;
+}
+
+/* ---- 取込プレビュー: セクションチップ ---- */
+.section-chips {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.section-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+.section-chip input[type="checkbox"] {
+  accent-color: var(--accent);
+  width: 14px; height: 14px; cursor: pointer;
+}
+.section-chip .chip-total { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.section-chip .chip-note { color: #e3b341; font-size: 11px; }
+.section-chip.chip-off { opacity: .6; }
+
+/* ---- 状態バッジ（取引履歴の被覆範囲など） ---- */
+.chip {
+  display: inline-block;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.chip-ok   { color: #3fb950; border-color: #3fb95055; background: #3fb9501a; }
+.chip-warn { color: #e3b341; border-color: #e3b34155; background: #e3b3411a; }
+.chip-ng   { color: #f85149; border-color: #f8514955; background: #f851491a; }
+html.light .chip-ok   { color: #1a7f37; }
+html.light .chip-warn { color: #9a6700; }
+html.light .chip-ng   { color: #cf222e; }
+
+/* ---- 取込プレビュー: diff行 ---- */
+.diff-status {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .3px;
+  white-space: nowrap;
+}
+.diff-new .diff-status       { background: #1a3a28; color: #3fb950; }
+.diff-changed .diff-status   { background: #1e2a42; color: #79c0ff; }
+.diff-missing .diff-status   { background: #3a1a1a; color: #f85149; }
+.diff-unchanged .diff-status { background: var(--bg-elev); color: var(--text-dim); }
+html.light .diff-new .diff-status       { background: #dcfce7; color: #166534; }
+html.light .diff-changed .diff-status   { background: #dbeafe; color: #1e40af; }
+html.light .diff-missing .diff-status   { background: #fee2e2; color: #991b1b; }
+html.light .diff-unchanged .diff-status { background: var(--bg-elev); color: var(--text-dim); }
+
+tr.diff-unchanged td { color: var(--text-dim); }
+tr.diff-excluded td { opacity: .45; }
+.diff-old { color: var(--text-dim); text-decoration: line-through; margin-right: 4px; }
+.diff-arrow { color: var(--text-dim); margin: 0 2px; }
+.confidence-warn { color: #e3b341; font-size: 11px; white-space: nowrap; }
+#import-diff-table input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
+#import-diff-table td { font-size: 13px; padding: 8px; }
+.zero-label { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-dim); cursor: pointer; white-space: nowrap; }
+
+/* ---- 設定: 価格ソース連携 ---- */
+.unlinked-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 10px;
+  background: var(--bg-elev);
+}
+.unlinked-row-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.unlinked-row-head .sec-name { font-weight: 600; font-size: 14px; }
+.unlinked-search {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+.unlinked-search input { flex: 1; min-width: 180px; }
+.fund-results { margin-top: 8px; }
+.fund-result-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+.fund-result-row:hover { background: var(--bg-card); }
+.fund-result-row .fund-cat { color: var(--text-dim); font-size: 11px; white-space: nowrap; }
+.fund-result-row .fund-name { flex: 1; min-width: 0; }
+
+/* ---- 設定: 投信 自動連携（一括判定） ---- */
+.autolink-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.autolink-results { margin: 4px 0 16px; }
+.autolink-chip { cursor: default; }
+.autolink-chip-auto { color: #3fb950; }
+.autolink-chip-cand { color: #e3b341; }
+.autolink-chip-none { color: var(--text-dim); }
+/* 「要確認」バッジ（黄系）。緑/グレーは .diff-new / .diff-unchanged を流用 */
+.autolink-cand .diff-status { background: #3a2d00; color: #e3b341; }
+html.light .autolink-cand .diff-status { background: #fef9c3; color: #854d0e; }
+#autolink-table td { font-size: 13px; padding: 8px; }
+#autolink-table input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
+#autolink-table input[type="checkbox"]:disabled { cursor: not-allowed; }
+.autolink-select { min-width: 220px; max-width: 100%; }
+
+/* ---- Myポートフォリオ: タグの自動配分（投信自動連携と同じ見た目を流用） ---- */
+.autoalloc-results { margin: 4px 0 8px; }
+#autoalloc-table td { font-size: 13px; padding: 8px; vertical-align: top; }
+#autoalloc-table input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px; cursor: pointer; }
+#autoalloc-table input[type="checkbox"]:disabled { cursor: not-allowed; }
+.autoalloc-chip-change { color: #79c0ff; }
+/* クラス推定（フォールバック）は黄系、投信っぽさ警告は赤系で強調 */
+.autoalloc-warn { color: #e3b341; font-size: 11px; white-space: nowrap; }
+.autoalloc-warn.strong { color: #f85149; }
+html.light .autoalloc-warn { color: #854d0e; }
+html.light .autoalloc-warn.strong { color: #991b1b; }
+
+/* ---- 削除確認ダイアログ ---- */
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, .65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+.dialog {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 28px 32px;
+  min-width: 300px;
+  max-width: 480px;
+}
+.dialog-title { font-size: 16px; font-weight: 600; margin-bottom: 12px; }
+.dialog-msg { font-size: 13px; color: var(--text-dim); margin-bottom: 20px; line-height: 1.6; }
+.dialog-actions { display: flex; gap: 12px; align-items: center; }
+
+/* ---- 推移グラフ ---- */
+.history-card { padding: 16px 20px 12px; margin-bottom: 20px; }
+.history-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.history-header h2 { margin-bottom: 0; }
+.range-tabs { display: flex; gap: 2px; }
+.range-tab {
+  background: none;
+  border: 1px solid transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 500;
+  padding: 4px 9px;
+  border-radius: 6px;
+  cursor: pointer;
+  line-height: 1;
+}
+.range-tab:hover { color: var(--text); border-color: var(--border); }
+.range-tab.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.history-chart-wrap {
+  position: relative;
+  height: 180px;
+}
+.history-empty {
+  color: var(--text-dim);
+  font-size: 13px;
+  text-align: center;
+  padding: 70px 0 0;
+}
+.history-unpriced {
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--text-dim);
+  padding: 6px 10px;
+  background: var(--bg-elev);
+  border-radius: 6px;
+  border-left: 3px solid var(--accent);
+}
+
+/* ---- Tablet (641-900px): サイドバーをアイコンのみに折りたたむ ---- */
+/* 幅は EN 切替ボタン等が収まる 60px（52px では中身が5pxはみ出す） */
+@media (min-width: 641px) and (max-width: 900px) {
+  :root { --sidebar-w: 60px; }
+  .sidebar { width: 60px; min-width: 60px; padding: 16px 6px; }
+  .brand { justify-content: center; }
+  .brand-name { display: none; }
+  .nav-link { justify-content: center; padding: 9px 0; gap: 0; }
+  .nav-link span:last-child { display: none; }
+  .sidebar-controls { padding-top: 8px; align-items: center; }
+  .sidebar-controls > label { display: none; }
+  .controls-row:not(.controls-row-icons) { display: none; }
+  .controls-row.controls-row-icons { flex-direction: column; gap: 4px; }
+}
+
+/* ---- スマホ横〜小型タブレット（960px以下）: テーブルの中間段階 ----
+   960px は iPhone Pro Max 横（932px）までを確実に含める境界。
+   保有テーブルは 銘柄・数量・評価額・前日比・評価損益（損益率は2行目）・
+   展開トグル（▶）を出し、口座(2)・平均取得単価(4)・現在値(5)・損益率の列(9)を
+   畳む。スマホ縦ではさらに数量（銘柄名の下のサブ表示へ）と前日比も畳む */
+@media (max-width: 960px) {
+  .holdings-table:not(#tag-table) th:nth-child(2), .holdings-table:not(#tag-table) td:nth-child(2),
+  .holdings-table:not(#tag-table) th:nth-child(4), .holdings-table:not(#tag-table) td:nth-child(4),
+  .holdings-table:not(#tag-table) th:nth-child(5), .holdings-table:not(#tag-table) td:nth-child(5),
+  .holdings-table:not(#tag-table) th:nth-child(9), .holdings-table:not(#tag-table) td:nth-child(9) { display: none; }
+
+  /* タグ管理（#tag-table）: 列構成が違うため個別に扱う。評価額(4)・前日比(5)を畳み、
+     色パレット（スウォッチ約10個の横並び）は折り返し可能にして幅を吸収する */
+  #tag-table th:nth-child(4), #tag-table td:nth-child(4),
+  #tag-table th:nth-child(5), #tag-table td:nth-child(5) { display: none; }
+  #tag-table .tag-color-cell { white-space: normal; }
+
+  /* 主な口座・Myポートフォリオ（ダッシュボード）・資産クラス別・口座別ページ:
+     銘柄数・評価損益・損益率を畳み、評価額・前日比・構成比を優先する */
+  #top-accounts-table th:nth-child(2), #top-accounts-table td:nth-child(2),
+  #top-accounts-table th:nth-child(5), #top-accounts-table td:nth-child(5),
+  #top-accounts-table th:nth-child(6), #top-accounts-table td:nth-child(6),
+  #dash-portfolios-table th:nth-child(2), #dash-portfolios-table td:nth-child(2),
+  #dash-portfolios-table th:nth-child(5), #dash-portfolios-table td:nth-child(5),
+  #dash-portfolios-table th:nth-child(6), #dash-portfolios-table td:nth-child(6),
+  #classes-table th:nth-child(2), #classes-table td:nth-child(2),
+  #classes-table th:nth-child(5), #classes-table td:nth-child(5),
+  #classes-table th:nth-child(6), #classes-table td:nth-child(6),
+  #accounts-table th:nth-child(2), #accounts-table td:nth-child(2),
+  #accounts-table th:nth-child(5), #accounts-table td:nth-child(5),
+  #accounts-table th:nth-child(6), #accounts-table td:nth-child(6) { display: none; }
+
+  /* Myポートフォリオ一覧: 対象タグ(2)・銘柄数(3)・評価損益(6)・損益率(7) を畳む */
+  #pf-table th:nth-child(2), #pf-table td:nth-child(2),
+  #pf-table th:nth-child(3), #pf-table td:nth-child(3),
+  #pf-table th:nth-child(6), #pf-table td:nth-child(6),
+  #pf-table th:nth-child(7), #pf-table td:nth-child(7) { display: none; }
+}
+
+/* ---- Tablet: ダッシュボードをコンパクトに ---- */
+@media (min-width: 641px) and (max-width: 1024px) {
+  .main-content { padding: 14px 18px; }
+  #page-dashboard .hero { padding: 12px 20px; margin-bottom: 12px; }
+  #page-dashboard .hero-value { font-size: 28px; }
+  #page-dashboard .hero-jpy { font-size: 12px; margin: -1px 0 2px; }
+  #page-dashboard .hero-sub { font-size: 12px; }
+  #page-dashboard .card { padding: 12px 14px; margin-bottom: 12px; }
+  #page-dashboard .history-card { padding: 10px 14px 8px; margin-bottom: 12px; }
+  #page-dashboard .dash-cards { margin-bottom: 12px; }
+  #page-dashboard .dash-cards > .card { margin-bottom: 12px; }
+  #page-dashboard .history-chart-wrap { height: 110px; }
+  #page-dashboard th, #page-dashboard td { padding: 7px 6px; }
+}
+
+/* ---- Mobile: サイドバーを上部に折りたたむ ---- */
+@media (max-width: 640px) {
+  body { overflow: auto; }
+  .layout { flex-direction: column; height: auto; }
+  .sidebar {
+    width: 100%; min-width: unset;
+    border-right: none; border-bottom: 1px solid var(--border);
+    flex-direction: row; flex-wrap: wrap;
+    padding: 12px;
+    align-items: center;
+  }
+  .brand { border-bottom: none; padding-bottom: 0; margin-bottom: 0; }
+  .nav { flex-direction: row; flex: unset; gap: 4px; flex-wrap: wrap; }
+  /* 8個のアイコンが 375px 幅でも1行に収まる余白にする */
+  .nav-link { padding: 8px; }
+  .nav-link span:last-child { display: none; }
+  .sidebar-controls { border-top: none; padding-top: 0; margin-top: 0; flex-direction: row; align-items: center; flex-wrap: wrap; }
+  .controls-row { gap: 4px; }
+  .logout-link { margin-top: 0; }
+  .main-content { padding: 14px 12px; overflow-y: auto; }
+  .holdings-search { margin-left: 0; max-width: 100%; }
+
+  /* カード類の余白を詰めて、表の実効幅を稼ぐ */
+  .card { padding: 16px 12px; }
+  .settings-panel { padding: 16px 12px; }
+  .history-card { padding: 12px 12px 10px; }
+  th, td { padding: 8px 5px; }
+  table { font-size: 13px; }
+
+  /* ヒーロー: 金額を一段小さくし、円読み・件数サマリーがはみ出さないようにする */
+  .hero { padding: 14px 16px; gap: 8px 16px; }
+  .hero-value { font-size: 24px; }
+  .hero-main { flex-wrap: wrap; }
+  .hero-jpy { white-space: nowrap; }
+  .hero-sub { margin-left: 0; white-space: normal; }
+}
+
+/* ---- Mobile: テーブル列の折りたたみ ---- */
+/* デスクトップでは detail toggle 列を非表示 */
+.detail-toggle-cell { display: none; }
+/* 960px以下（スマホ縦・横）ではトグル列を出す（畳んだ列の値を展開して見る）。
+   基本ルールの直後に書くこと: 前方のメディアブロックに書くと同詳細度の
+   後勝ちで display:none に戻ってしまう */
+@media (max-width: 960px) {
+  .detail-toggle-cell { display: table-cell; padding: 6px 2px 6px 0; white-space: nowrap; }
+}
+
+/* detail 展開行（共通） */
+.detail-row > td {
+  padding: 0 12px 10px;
+  background: var(--bg-elev);
+}
+.detail-row dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 5px 14px;
+  margin: 4px 0 0;
+  font-size: 12px;
+}
+.detail-row dt { color: var(--text-dim); white-space: nowrap; }
+.detail-row dd { margin: 0; word-break: break-all; }
+
+.detail-toggle-btn {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  border-radius: 6px;
+  padding: 2px 7px;
+  font-size: 11px;
+  cursor: pointer;
+  line-height: 1.4;
+  transition: border-color .15s, color .15s;
+}
+.detail-toggle-btn[aria-expanded="true"] { border-color: var(--accent); color: var(--accent); }
+
+@media (max-width: 640px) {
+  /* toggle ボタンをさらにコンパクトに（列の表示自体は 960px 以下で有効） */
+  .detail-toggle-btn { padding: 2px 5px; }
+
+  /* ページ拡大使用時は実効幅が 320px 程度まで狭くなるため、保有テーブルは
+     セル余白と出所バッジを一段詰めて、右端（損益・展開ボタン）の切れを防ぐ */
+  .holdings-table th, .holdings-table td { padding: 8px 3px; }
+  .holdings-table .ref-badge { font-size: 9px; }
+
+  /* 注: バッジを overflow/ellipsis で縮める方式は不可。テーブルの列幅計算は
+     バッジの縮小を考慮せず全文幅を最小幅として使うため、はみ出しは消えない
+     （Crypto-Summary連携バッジは cs-badge-short への表記切替で対応している） */
+
+  /* タグ管理（#tag-table）: 色(2)・設定銘柄数(3) を折りたたむ */
+  #tag-table th:nth-child(2), #tag-table td:nth-child(2),
+  #tag-table th:nth-child(3), #tag-table td:nth-child(3) { display: none; }
+
+  /* タグ別構成（ダッシュボード・タグ別サマリー）: 右端の「›」列を畳む
+     （行全体がタップ可能なので操作は失われない）。構成比の列は共通の
+     .weight-col ルールで畳まれ、評価額の2行目（.weight-sub）に出る */
+  #dash-tag-table th:nth-child(5), #dash-tag-table td:nth-child(5),
+  #tagsum-table th:nth-child(5), #tagsum-table td:nth-child(5) { display: none; }
+  #dash-tag-table th, #dash-tag-table td,
+  #tagsum-table th, #tagsum-table td,
+  #pf-tag-table th, #pf-tag-table td { padding: 8px 4px; }
+
+  /* 設定: 「総資産に含める」「ダッシュボードに表示」の見出しは折り返しを許可する。
+     nowrap のままだと表が画面幅を超えて右端のチェックボックスが切れる */
+  #settings-class-table th { white-space: normal; }
+
+  /* diffテーブル: 口座(4)・平均取得単価(6) を折りたたむ */
+  #import-diff-table th:nth-child(4), #import-diff-table td:nth-child(4),
+  #import-diff-table th:nth-child(6), #import-diff-table td:nth-child(6) { display: none; }
+
+  /* 銘柄一覧: コード(2)・通貨(4) を折りたたむ */
+  #securities-table th:nth-child(2), #securities-table td:nth-child(2),
+  #securities-table th:nth-child(4), #securities-table td:nth-child(4) { display: none; }
+
+  /* 登録済み保有: ラベル(3)・平均取得単価(5) を折りたたむ */
+  #manage-holdings-table th:nth-child(3), #manage-holdings-table td:nth-child(3),
+  #manage-holdings-table th:nth-child(5), #manage-holdings-table td:nth-child(5) { display: none; }
+}
+
+/* ---- スマホ縦持ち: 保有テーブルは前日比(7)も畳む ----
+   銘柄・評価額・評価損益（損益率を2行目に表示）を優先し、前日比は展開トグルで
+   見る。幅だけで判定しないのは、Safari のページ拡大（あA）や拡大表示設定では
+   横持ちでも実効幅が 560px を下回りうるため。横持ち（landscape）では実効幅が
+   狭くても前日比を残し、極端に狭い場合（480px未満）だけ畳む */
+@media (max-width: 560px) and (orientation: portrait),
+       (max-width: 479px) and (orientation: landscape) {
+  /* タグ名チップは幅が足りないときだけ内部で折り返す。チップが折り返し不可の
+     まま長いと、前日比が6桁（+128,501円 等）の行でテーブルが画面幅を超える */
+  #dash-tag-table .tag-chip, #tagsum-table .tag-chip, #pf-tag-table .tag-chip {
+    white-space: normal;
+  }
+}
+
+/* ---- 極狭幅（ページ拡大などで実効幅が374px以下の縦持ち） ----
+   ±7桁円の損益や6桁円の前日比は縮められないため、集計テーブル
+   （タグ別・クラス・口座など）は前日比列を畳んで「名前｜評価額（＋構成比）」に
+   する（前日比はヒーローの合計・タップ先の詳細で見られる）。
+   保有テーブルはカード型表示（後方のブロック）が幅を吸収するため対象外 */
+@media (max-width: 374px) and (orientation: portrait) {
+  #dash-tag-table th:nth-child(3), #dash-tag-table td:nth-child(3),
+  #tagsum-table th:nth-child(3), #tagsum-table td:nth-child(3),
+  #pf-tag-table th:nth-child(3), #pf-tag-table td:nth-child(3),
+  #class-table th:nth-child(3), #class-table td:nth-child(3),
+  #pf-currency-table th:nth-child(3), #pf-currency-table td:nth-child(3),
+  #pf-class-table th:nth-child(3), #pf-class-table td:nth-child(3),
+  #pf-account-table th:nth-child(3), #pf-account-table td:nth-child(3),
+  #top-accounts-table th:nth-child(4), #top-accounts-table td:nth-child(4),
+  #dash-portfolios-table th:nth-child(4), #dash-portfolios-table td:nth-child(4),
+  #classes-table th:nth-child(4), #classes-table td:nth-child(4),
+  #accounts-table th:nth-child(4), #accounts-table td:nth-child(4),
+  #pf-table th:nth-child(5), #pf-table td:nth-child(5) { display: none; }
+}
+
+/* ---- 数量の表示切替 ----
+   横持ち・PCでは数量の列（銘柄名の幅はそのぶん狭くなる）、縦持ちでは列を畳んで
+   銘柄名の下のサブ表示（.qty-sub、app.js の renderHoldingsRows と対）に出す。
+   数量が常に1の行（現金・不動産など）はサブ表示を出さない */
+.qty-sub { display: none; font-size: 11px; color: var(--text-dim); }
+@media (max-width: 960px) and (orientation: portrait),
+       (max-width: 479px) and (orientation: landscape) {
+  .holdings-table:not(#tag-table) th:nth-child(3),
+  .holdings-table:not(#tag-table) td:nth-child(3) { display: none; }
+  .qty-sub { display: block; }
+}
+
+/* ---- スマホ縦持ち: 保有銘柄はカード型で表示 ----
+   表の列に押し込む方式は、文字を小さくしても数値（±7桁円）が縮まず、
+   ページ拡大使用時に右端が切れる。1銘柄=1カードにして、銘柄名の下に
+   数量・評価額・前日比・評価損益をラベル付きの2列グリッドで並べる
+   （Yahooファイナンス アプリのポートフォリオと同じ考え方）。
+   ラベルは td の data-label 属性から描く（renderHoldingsRows と対）。
+   横持ち・PCは従来の表のまま */
+@media (max-width: 560px) and (orientation: portrait),
+       (max-width: 479px) and (orientation: landscape) {
+  .holdings-table:not(#tag-table),
+  .holdings-table:not(#tag-table) tbody { display: block; }
+
+  /* ソート可能な表では、見出し行を「銘柄・評価額・評価損益」のソートバーとして残す */
+  .holdings-table:not(#tag-table) thead { display: block; }
+  .holdings-table:not(#tag-table) thead tr {
+    display: flex;
+    gap: 18px;
+    padding: 0 0 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .holdings-table:not(#tag-table) thead th { display: none; padding: 0; border: none; }
+  .holdings-table:not(#tag-table) thead th[data-sort="name"],
+  .holdings-table:not(#tag-table) thead th[data-sort="value"],
+  .holdings-table:not(#tag-table) thead th[data-sort="pl"] { display: inline-block; }
+  .holdings-table:not(.sortable):not(#tag-table) thead { display: none; }
+
+  /* 1行 = 1カード（2列グリッド）。右上に展開トグル */
+  .holdings-table:not(#tag-table) tbody tr {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px 14px;
+    position: relative;
+    padding: 11px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .holdings-table:not(#tag-table) tbody tr:last-child { border-bottom: none; }
+  .holdings-table:not(#tag-table) tbody td { display: none; border: none; padding: 0; }
+  .holdings-table:not(#tag-table) tbody td:first-child {
+    display: block;
+    grid-column: 1 / -1;
+  }
+  /* 口座は銘柄名の下に小さく出す（空なら行ごと出さない） */
+  .holdings-table:not(#tag-table) tbody td:nth-child(2) {
+    display: block;
+    grid-column: 1 / -1;
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-top: -4px;
+  }
+  .holdings-table:not(#tag-table) tbody td:nth-child(2):empty { display: none; }
+  .holdings-table:not(#tag-table) tbody td[data-label] {
+    display: block;
+    text-align: left;
+    font-size: 14px;
+    /* 並び順は全カード共通で固定: 数量・評価額 / 現在値（取得単価） /
+       前日比・損益 / 固有列（計上額等）。前日比が常に左下・損益が右下に来る */
+    order: 7;
+  }
+  .holdings-table:not(#tag-table) tbody td:nth-child(3)[data-label] { order: 1; }
+  /* 評価額は常に右列。現金等の最小カード（数量なし）でも他カードと位置が揃う */
+  .holdings-table:not(#tag-table) tbody td:nth-child(6)[data-label] { order: 2; grid-column: 2; }
+  .holdings-table:not(#tag-table) tbody td:nth-child(5)[data-label] {
+    order: 3;
+    grid-column: 1 / -1;
+  }
+  .holdings-table:not(#tag-table) tbody td:nth-child(7)[data-label] { order: 4; }
+  .holdings-table:not(#tag-table) tbody td:nth-child(8)[data-label] { order: 5; }
+  /* 現在値セルはカードでは統合表示に切り替える */
+  .holdings-table:not(#tag-table) tbody .price-plain { display: none; }
+  .holdings-table:not(#tag-table) tbody .price-merged { display: inline; }
+  .holdings-table:not(#tag-table) tbody td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    font-size: 10px;
+    color: var(--text-dim);
+    letter-spacing: .3px;
+    margin-bottom: 1px;
+  }
+  /* 「金額＋%」の2行スタックは、カードでは横並び1行（狭ければ%だけ折り返す） */
+  .holdings-table:not(#tag-table) tbody td[data-label] .cell-stack {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: flex-start;
+    gap: 0 6px;
+  }
+  .holdings-table:not(#tag-table) tbody td[data-label] .cell-sub { font-size: 12px; }
+  /* 数量はセルとして出すため、銘柄名下のサブ表示は重複させない */
+  .holdings-table:not(#tag-table) .qty-sub { display: none; }
+  /* カードは口座・取得単価・現在値まで全て表示するので、展開トグル（▶）は出さない
+     （トグルの中身と同じ情報がカードに揃っている） */
+  .holdings-table:not(#tag-table) .detail-toggle-cell { display: none; }
+  /* 読み込み中・空状態（colspan セル）は全幅ブロックで出す */
+  .holdings-table:not(#tag-table) tbody td[colspan] { display: block; grid-column: 1 / -1; }
+}
+
+/* ---- ライトモード：コンポーネント上書き ---- */
+html.light .hero {
+  background: linear-gradient(135deg, #eef4ff, #e8f0fe);
+}
+html.light .warnings {
+  background: #fefce8; border-color: #ca8a04; color: #713f12;
+}
+html.light .history-unpriced {
+  background: #fefce8; border-color: #ca8a04; color: #713f12;
+}
+
+/* ---- テーマ・マスク切替ボタン ---- */
+.icon-btn {
+  font-size: 15px;
+  line-height: 1;
+  padding: 5px 8px;
+}
+#theme-toggle, #mask-toggle, #lang-toggle {
+  flex-shrink: 0;
+}
+
+/* 金額マスクモードは JS の fmtMoney/fmtAmount でテキストを ●●●●● に
+   置換して実現する（Canvas 内テキストも含め一貫してマスクするため）。 */
+
+/* ======================================================================
+   Myポートフォリオ / タグ
+   ====================================================================== */
+
+/* タグの色チップ。--tag-color をインラインで与える */
+.tag-chip {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 11px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--tag-color, var(--accent));
+  background: color-mix(in srgb, var(--tag-color, var(--accent)) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--tag-color, var(--accent)) 45%, transparent);
+  white-space: nowrap;
+}
+.tag-chip.small { font-size: 11px; padding: 1px 7px; margin-right: 4px; }
+
+/* ポートフォリオ作成フォームのタグ選択 */
+.tag-picker { display: flex; flex-wrap: wrap; gap: 10px; }
+.tag-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  user-select: none;
+}
+.tag-pick input { cursor: pointer; }
+
+/* 銘柄へのタグ割当 */
+.assign-list { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+.assign-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--bg-subtle, transparent);
+}
+.assign-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.assign-name { font-weight: 600; font-size: 13px; }
+.assign-code { font-size: 11px; color: var(--text-dim); }
+.assign-remain { margin-left: auto; font-size: 11px; color: var(--text-dim); }
+.assign-remain.over { color: var(--red); font-weight: 600; }
+.assign-inputs { display: flex; flex-wrap: wrap; gap: 10px 14px; }
+.assign-cell { display: inline-flex; align-items: center; gap: 5px; }
+.assign-weight {
+  width: 58px;
+  padding: 3px 6px;
+  font-size: 12px;
+  text-align: right;
+  background: var(--input-bg, var(--bg));
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+}
+.assign-weight::-webkit-outer-spin-button,
+.assign-weight::-webkit-inner-spin-button { margin-left: 2px; }
+
+/* タグ色ピッカー */
+.color-input {
+  width: 40px;
+  height: 30px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  cursor: pointer;
+}
+
+/* 一覧の行内アクション */
+.row-actions { white-space: nowrap; text-align: right; }
+.btn-link {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 3px 6px;
+}
+.btn-link:hover { text-decoration: underline; border: none; }
+.btn-link.danger { color: var(--red); }
+
+@media (max-width: 720px) {
+  .assign-inputs { gap: 8px 10px; }
+  .assign-weight { width: 52px; }
+}
+
+/* 未配分の強調 */
+.assign-row.unallocated {
+  border-color: var(--yellow, #d29922);
+  background: color-mix(in srgb, var(--yellow, #d29922) 8%, transparent);
+}
+.assign-remain.warn { color: var(--yellow, #d29922); font-weight: 600; }
+.assign-amount { font-size: 11px; color: var(--text-dim); }
+.unalloc-names { font-size: 12px; margin-top: 4px; opacity: .9; }
+#unalloc-banner .card-link { display: block; margin-top: 6px; padding-left: 0; }
+
+/* ======================================================================
+   ダッシュボードのレイアウト編集 / 資産クラス切替 / ソート
+   ====================================================================== */
+
+.dash-toolbar { display: flex; justify-content: flex-end; margin-bottom: 8px; }
+
+.include-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.include-label { font-size: 12px; color: var(--text-dim); }
+.include-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  background: transparent;
+}
+.include-chip.on {
+  color: var(--tag-color, var(--accent));
+  border-color: color-mix(in srgb, var(--tag-color, var(--accent)) 45%, transparent);
+  background: color-mix(in srgb, var(--tag-color, var(--accent)) 12%, transparent);
+}
+.include-chip input { cursor: pointer; margin: 0; }
+
+.layout-list { display: flex; flex-direction: column; gap: 6px; margin: 10px 0; }
+.layout-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+.layout-label { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; font-size: 13px; }
+.layout-actions { display: flex; gap: 2px; }
+.layout-actions .btn-link { font-size: 14px; padding: 2px 8px; }
+.layout-actions .btn-link:disabled { opacity: .3; cursor: default; text-decoration: none; }
+
+/* ソート可能な見出し */
+table.sortable thead th[data-sort] { cursor: pointer; user-select: none; white-space: nowrap; }
+table.sortable thead th[data-sort]:hover { color: var(--accent); }
+table.sortable thead th[data-sort]::after {
+  content: "⇅";
+  margin-left: 4px;
+  opacity: .25;
+  font-size: 10px;
+}
+table.sortable thead th.sorted.asc::after { content: "▲"; opacity: .9; }
+table.sortable thead th.sorted.desc::after { content: "▼"; opacity: .9; }
+table.sortable thead th.sorted { color: var(--accent); }
+
+td.chev { color: var(--text-dim); text-align: right; }
+
+/* クリックで詳細に進める表（タグ別サマリー等） */
+table.clickable-rows tbody tr { cursor: pointer; }
+table.clickable-rows tbody tr:hover td { color: var(--accent); }
+
+/* 削除ボタンを見つけやすくする（アイコンだけだと気づけないため文字も出す） */
+.delete-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--red);
+  font-size: 12px;
+  padding: 3px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.delete-btn:hover { background: color-mix(in srgb, var(--red) 14%, transparent); border-color: var(--red); }
+.manage-delete-note { margin-bottom: 12px; }
+
+/* 銘柄統合（名寄せ）ボタン。削除と並ぶが破壊色にしない */
+.merge-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--accent);
+  font-size: 12px;
+  padding: 3px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.merge-btn:hover { background: color-mix(in srgb, var(--accent) 14%, transparent); border-color: var(--accent); }
+
+/* タグの名前・色をその場で編集する */
+.tag-chip-edit { padding: 1px 6px; }
+.tag-name-input {
+  background: transparent;
+  border: none;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  width: 9em;
+  min-width: 4em;
+  padding: 1px 2px;
+  border-radius: 4px;
+}
+.tag-name-input:hover { background: color-mix(in srgb, var(--tag-color) 12%, transparent); }
+.tag-name-input:focus { outline: 1px solid var(--tag-color); background: var(--bg); }
+
+.tag-color-cell { white-space: nowrap; }
+.tag-swatch {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  margin-right: 3px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  vertical-align: middle;
+}
+.tag-swatch:hover { transform: scale(1.15); }
+.tag-swatch.on { border-color: var(--text); box-shadow: 0 0 0 1px var(--bg); }
+.tag-color-picker { width: 28px; height: 22px; vertical-align: middle; margin-left: 4px; }
+
+/* 取込プレビュー: CSV が説明できていない保有の一覧 */
+.tx-unexplained-list { margin: 6px 0 0; padding-left: 18px; }
+.tx-unexplained-list li { margin: 2px 0; }
+
+/* 取込プレビューの警告: 判断が要るものだけ目立たせ、報告は畳む */
+.tx-notice-action { color: #e3b341; margin: 3px 0; }
+html.light .tx-notice-action { color: #9a6700; }
+.tx-notice-ok { color: #3fb950; margin: 3px 0; }
+html.light .tx-notice-ok { color: #1a7f37; }
+.tx-notice-info { margin-top: 6px; color: var(--text-dim); }
+.tx-notice-info summary { cursor: pointer; }
+.tx-notice-info div { margin: 3px 0 3px 14px; }

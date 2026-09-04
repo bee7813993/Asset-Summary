@@ -1,0 +1,1858 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Asset Summary ダッシュボード</title>
+  <link rel="stylesheet" href="static/style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <div class="layout">
+    <!-- サイドバー -->
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="logo">▦</span>
+        <span class="brand-name">Asset Summary</span>
+      </div>
+
+      <nav class="nav">
+        <a class="nav-link active" data-page="dashboard" href="#dashboard">
+          <span class="nav-icon">⊞</span><span data-i18n="nav.dashboard">ダッシュボード</span>
+        </a>
+        <a class="nav-link" data-page="classes" href="#classes">
+          <span class="nav-icon">◔</span><span data-i18n="nav.classes">資産クラス別</span>
+        </a>
+        <a class="nav-link" data-page="accounts" href="#accounts">
+          <span class="nav-icon">◫</span><span data-i18n="nav.accounts">口座別</span>
+        </a>
+        <a class="nav-link" data-page="holdings" href="#holdings">
+          <span class="nav-icon">◎</span><span data-i18n="nav.holdings">保有一覧</span>
+        </a>
+        <a class="nav-link" data-page="portfolios" href="#portfolios">
+          <span class="nav-icon">◈</span><span data-i18n="nav.portfolios">Myポートフォリオ</span>
+        </a>
+        <a class="nav-link" data-page="import" href="#import">
+          <span class="nav-icon">↑</span><span data-i18n="nav.import">データ取込</span>
+        </a>
+        <a class="nav-link" data-page="manage" href="#manage">
+          <span class="nav-icon">✎</span><span data-i18n="nav.manage">手動登録</span>
+        </a>
+        <a class="nav-link" data-page="settings" href="#settings">
+          <span class="nav-icon">⚙</span><span data-i18n="nav.settings">設定</span>
+        </a>
+      </nav>
+
+      <div class="sidebar-controls">
+        <label for="currency" data-i18n="label.currency">通貨</label>
+        <div class="controls-row">
+          <select id="currency">
+            <option value="JPY">JPY</option>
+            <option value="USD">USD</option>
+            <option value="EUR">EUR</option>
+            <option value="GBP">GBP</option>
+          </select>
+          <button id="refresh" data-i18n-title="btn.refresh" title="再取得">⟳</button>
+        </div>
+        <div class="controls-row controls-row-icons">
+          <button id="theme-toggle" class="icon-btn" title="ライト／ダークモード切替">☀</button>
+          <button id="mask-toggle" class="icon-btn" title="金額の表示／非表示">👁</button>
+          <button id="lang-toggle" class="icon-btn" title="日本語 / English">EN</button>
+        </div>
+        <a id="logout-btn" class="logout-link hidden" href="auth/logout" data-i18n="auth.logout">ログアウト</a>
+      </div>
+    </aside>
+
+    <!-- メインコンテンツ -->
+    <main class="main-content">
+
+      <!-- ダッシュボードページ -->
+      <div id="page-dashboard" class="page">
+        <section class="hero">
+          <div class="hero-left">
+            <div class="hero-label" data-i18n="dash.totalValue">総資産評価額</div>
+            <div class="hero-main">
+              <span class="hero-value" id="total-value">—</span>
+              <span id="total-jpy" class="hero-jpy hidden"></span>
+            </div>
+            <div class="hero-pl" id="total-pl"></div>
+            <div class="hero-day" id="total-day"></div>
+            <div class="hero-note hidden" id="pl-note"></div>
+          </div>
+          <div class="hero-sub" id="total-sub" data-i18n="label.loading">読み込み中…</div>
+        </section>
+
+        <!-- 総資産に含める資産クラスの切替 -->
+        <div id="dash-include-row" class="include-row hidden"></div>
+
+        <div id="warnings" class="warnings hidden"></div>
+
+        <!-- ダッシュボードのレイアウト編集 -->
+        <div class="dash-toolbar">
+          <button id="dash-layout-btn" class="card-link" data-i18n="dash.editLayout">▤ 表示項目を編集</button>
+        </div>
+        <section id="dash-layout-panel" class="card settings-panel hidden">
+          <h2 data-i18n="dash.layoutTitle">ダッシュボードの表示項目</h2>
+          <p class="card-hint" data-i18n="dash.layoutHint">表示のオン・オフと並び順を変更できます。設定は保存され、他の端末でも同じ並びになります。</p>
+          <div id="dash-layout-list" class="layout-list"></div>
+          <div class="settings-actions">
+            <button id="dash-layout-reset" class="btn-secondary" data-i18n="dash.layoutReset">既定に戻す</button>
+            <button id="dash-layout-close" class="btn-primary" data-i18n="btn.close">閉じる</button>
+          </div>
+          <div id="dash-layout-result" class="settings-result hidden"></div>
+        </section>
+
+        <!-- 空状態ガイド -->
+        <section id="empty-guide" class="card empty-guide hidden">
+          <div class="empty-guide-icon">▦</div>
+          <p data-i18n="dash.emptyGuide">保有データがまだありません。マネーフォワードMEのPDFを取り込むか、手動で登録してください。</p>
+          <div class="empty-guide-actions">
+            <button class="settings-save-btn" data-nav="import" data-i18n="dash.emptyImport">↑ PDFを取り込む</button>
+            <button class="action-btn" data-nav="manage" data-i18n="dash.emptyManage">✎ 手動で登録する</button>
+          </div>
+        </section>
+
+        <!-- ウィジェット領域（並び順は設定に従って JS が並べ替える） -->
+        <div id="dash-widgets">
+
+        <!-- 推移グラフ（ダッシュボード：総資産） -->
+        <section class="card history-card" data-widget="history">
+          <div class="history-header">
+            <h2 data-i18n="dash.valueHistory">資産推移</h2>
+            <div class="range-tabs" id="dash-range-tabs">
+              <button class="range-tab" data-range="7d">7D</button>
+              <button class="range-tab" data-range="30d">30D</button>
+              <button class="range-tab active" data-range="90d">90D</button>
+              <button class="range-tab" data-range="1y">1Y</button>
+              <button class="range-tab" data-range="all">ALL</button>
+            </div>
+          </div>
+          <div class="history-chart-wrap">
+            <canvas id="history-chart"></canvas>
+            <p class="history-empty hidden" data-i18n="label.noHistData">推移データがありません</p>
+          </div>
+          <div id="history-loading" class="loading hidden" data-i18n="label.loading">読み込み中…</div>
+          <div id="history-unpriced" class="history-unpriced hidden"></div>
+        </section>
+
+        <section class="card chart-card" data-widget="classes">
+            <h2 data-i18n="dash.classAlloc">資産クラス構成</h2>
+            <div class="chart-wrap">
+              <canvas id="alloc-chart"></canvas>
+            </div>
+            <div class="chart-card-detail">
+              <div class="table-wrap">
+                <table id="class-table">
+                  <thead>
+                    <tr>
+                      <th data-i18n="th.assetClass">資産クラス</th>
+                      <th class="num" data-i18n="th.value">評価額</th>
+                      <th class="num" data-i18n="th.dayChange">前日比</th>
+                      <th class="num weight-col" data-i18n="th.weight">構成比</th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+            <div class="card-footer">
+              <button class="card-link" data-nav="classes" data-i18n="dash.showAllClasses">資産クラス別詳細を表示 →</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- タグ別構成 -->
+        <section class="card chart-card" data-widget="tags">
+            <h2 data-i18n="dash.tagAlloc">タグ別構成</h2>
+            <div class="chart-wrap">
+              <canvas id="dash-tag-chart"></canvas>
+            </div>
+            <div class="chart-card-detail">
+              <div class="table-wrap">
+                <table id="dash-tag-table" class="clickable-rows">
+                  <thead>
+                    <tr>
+                      <th data-i18n="pf.tagName">タグ</th>
+                      <th class="num" data-i18n="th.value">評価額</th>
+                      <th class="num" data-i18n="th.dayChange">前日比</th>
+                      <th class="num weight-col" data-i18n="th.weight">構成比</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+            <div class="card-footer">
+              <button class="card-link" data-nav="portfolios" data-i18n="dash.showPortfolios">Myポートフォリオを表示 →</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- Myポートフォリオ -->
+        <section class="card" data-widget="portfolios">
+            <h2 data-i18n="nav.portfolios">Myポートフォリオ</h2>
+            <p class="card-hint" data-i18n="dash.portfoliosHint">クリックで詳細（タグ別・通貨別・口座別の内訳）</p>
+            <div class="table-wrap">
+              <table id="dash-portfolios-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="pf.name">名前</th>
+                    <th class="num" data-i18n="th.holdingCount">銘柄数</th>
+                    <th class="num" data-i18n="th.value">評価額</th>
+                    <th class="num" data-i18n="th.dayChange">前日比</th>
+                    <th class="num" data-i18n="th.pl">評価損益</th>
+                    <th class="num" data-i18n="th.plPct">損益率</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <div id="dash-portfolios-empty" class="empty-state hidden">
+              <p data-i18n="dash.portfoliosEmpty">Myポートフォリオがまだありません。</p>
+              <button class="card-link" data-nav="portfolios" data-i18n="dash.portfoliosCreate">ポートフォリオを作る →</button>
+            </div>
+          <div class="card-footer">
+            <button class="card-link" data-nav="portfolios" data-i18n="dash.showPortfolios">Myポートフォリオを表示 →</button>
+          </div>
+        </section>
+
+        <section class="card" data-widget="accounts">
+            <h2 data-i18n="dash.topAccounts">主な口座</h2>
+            <p class="card-hint" data-i18n="dash.topAccountsHint">評価額の大きい順・上位のみ（クリックで詳細）</p>
+            <div class="table-wrap">
+              <table id="top-accounts-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="th.account">口座</th>
+                    <th class="num" data-i18n="th.holdingCount">銘柄数</th>
+                    <th class="num" data-i18n="th.value">評価額</th>
+                    <th class="num" data-i18n="th.dayChange">前日比</th>
+                    <th class="num" data-i18n="th.pl">評価損益</th>
+                    <th class="num" data-i18n="th.plPct">損益率</th>
+                    <th class="num weight-col" data-i18n="th.weight">構成比</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          <div class="card-footer">
+            <button class="card-link" data-nav="accounts" data-i18n="dash.showAllAccounts">すべての口座を表示 →</button>
+          </div>
+        </section>
+
+        <section class="card" data-widget="holdings">
+          <h2 data-i18n="dash.topHoldings">主な保有</h2>
+          <p class="card-hint" data-i18n="dash.topHoldingsHint">評価額の大きい順・上位のみ（クリックで銘柄詳細）</p>
+          <div class="table-wrap">
+            <table id="top-holdings-table" class="holdings-table">
+              <thead>
+                <tr>
+                  <th data-i18n="th.security">銘柄</th>
+                  <th data-i18n="th.account">口座</th>
+                  <th class="num" data-i18n="th.quantity">数量</th>
+                  <th class="num" data-i18n="th.avgCost">平均取得単価</th>
+                  <th class="num" data-i18n="th.currentPrice">現在値</th>
+                  <th class="num" data-i18n="th.value">評価額</th>
+                  <th class="num" data-i18n="th.dayChange">前日比</th>
+                  <th class="num" data-i18n="th.pl">評価損益</th>
+                  <th class="num" data-i18n="th.plPct">損益率</th>
+                  <th class="detail-toggle-cell"></th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="card-footer">
+            <button class="card-link" data-nav="holdings" data-i18n="dash.showAllHoldings">すべての保有を表示 →</button>
+          </div>
+        </section>
+
+        </div><!-- /#dash-widgets -->
+
+        <footer class="footer">
+          <span id="generated">—</span>
+          <span class="dot">·</span>
+          <span data-i18n="dash.priceSource">価格: Yahoo Finance / 投信協会（キャッシュあり）</span>
+        </footer>
+      </div>
+
+      <!-- 資産クラス別ページ -->
+      <div id="page-classes" class="page hidden">
+        <div id="classes-list-view">
+          <h1 class="page-title" data-i18n="nav.classes">資産クラス別</h1>
+          <section class="card">
+            <p class="card-hint" data-i18n="label.classesHint">クリックで推移チャートと保有内訳</p>
+            <div class="table-wrap">
+              <table id="classes-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="th.assetClass">資産クラス</th>
+                    <th class="num" data-i18n="th.holdingCount">銘柄数</th>
+                    <th class="num" data-i18n="th.value">評価額</th>
+                    <th class="num" data-i18n="th.dayChange">前日比</th>
+                    <th class="num" data-i18n="th.pl">評価損益</th>
+                    <th class="num" data-i18n="th.plPct">損益率</th>
+                    <th class="num weight-col" data-i18n="th.weight">構成比</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+
+        <div id="class-detail-view" class="hidden">
+          <div class="detail-header">
+            <button id="class-back" class="back-btn" data-i18n="btn.backToClasses">← 資産クラス一覧</button>
+            <h1 class="page-title" id="class-detail-name"></h1>
+            <a id="class-cs-link" class="back-btn cs-link-btn hidden" target="_blank" rel="noopener"></a>
+          </div>
+          <div id="class-detail-warnings" class="warnings hidden"></div>
+
+          <section class="hero">
+            <div class="hero-left">
+              <div class="hero-label" data-i18n="th.value">評価額</div>
+              <div class="hero-main">
+                <span class="hero-value" id="class-detail-total">—</span>
+                <span id="class-detail-jpy" class="hero-jpy"></span>
+              </div>
+              <div class="hero-pl" id="class-detail-pl"></div>
+              <div class="hero-day" id="class-detail-day"></div>
+              <div class="hero-note hidden" id="class-detail-note"></div>
+            </div>
+          </section>
+
+          <section class="card history-card">
+            <div class="history-header">
+              <h2 data-i18n="label.valueHistorySection">評価額推移</h2>
+              <div class="range-tabs" id="class-range-tabs">
+                <button class="range-tab" data-range="7d">7D</button>
+                <button class="range-tab" data-range="30d">30D</button>
+                <button class="range-tab active" data-range="90d">90D</button>
+                <button class="range-tab" data-range="1y">1Y</button>
+                <button class="range-tab" data-range="all">ALL</button>
+              </div>
+            </div>
+            <div class="history-chart-wrap">
+              <canvas id="class-history-chart"></canvas>
+              <p class="history-empty hidden" data-i18n="label.noHistData">推移データがありません</p>
+            </div>
+            <div id="class-history-loading" class="loading hidden" data-i18n="label.loading">読み込み中…</div>
+            <div id="class-history-unpriced" class="history-unpriced hidden"></div>
+          </section>
+
+          <section class="card">
+            <div class="table-wrap">
+              <table id="class-holdings-table" class="holdings-table sortable">
+                <thead>
+                  <tr>
+                    <th data-sort="name" data-i18n="th.security">銘柄</th>
+                    <th data-sort="account" data-i18n="th.account">口座</th>
+                    <th class="num" data-sort="quantity" data-i18n="th.quantity">数量</th>
+                    <th class="num" data-sort="avg_cost" data-i18n="th.avgCost">平均取得単価</th>
+                    <th class="num" data-sort="price" data-i18n="th.currentPrice">現在値</th>
+                    <th class="num" data-sort="value" data-i18n="th.value">評価額</th>
+                    <th class="num" data-sort="day_change" data-i18n="th.dayChange">前日比</th>
+                    <th class="num" data-sort="pl" data-i18n="th.pl">評価損益</th>
+                    <th class="num" data-sort="pl_pct" data-i18n="th.plPct">損益率</th>
+                    <th class="detail-toggle-cell"></th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <div id="class-detail-loading" class="loading hidden" data-i18n="label.loading">読み込み中…</div>
+          </section>
+        </div>
+
+        <!-- Crypto-Summary コイン別サブビュー -->
+        <div id="cs-asset-view" class="hidden">
+          <div class="detail-header">
+            <button id="cs-asset-back" class="back-btn" data-i18n="cs.backToCrypto">← 暗号資産クラス</button>
+            <h1 class="page-title" id="cs-asset-name"></h1>
+            <a id="cs-asset-link" class="back-btn cs-link-btn hidden" target="_blank" rel="noopener"></a>
+          </div>
+          <div id="cs-asset-meta" class="security-meta"></div>
+          <div id="cs-asset-warnings" class="warnings hidden"></div>
+
+          <section class="card history-card">
+            <div class="history-header">
+              <h2 data-i18n="label.valueHistorySection">評価額推移</h2>
+              <div class="range-tabs" id="cs-asset-range-tabs">
+                <button class="range-tab" data-range="7d">7D</button>
+                <button class="range-tab" data-range="30d">30D</button>
+                <button class="range-tab active" data-range="90d">90D</button>
+                <button class="range-tab" data-range="1y">1Y</button>
+                <button class="range-tab" data-range="all">ALL</button>
+              </div>
+            </div>
+            <div class="history-chart-wrap">
+              <canvas id="cs-asset-history-chart"></canvas>
+              <p class="history-empty hidden" data-i18n="label.noHistData">推移データがありません</p>
+            </div>
+            <div id="cs-asset-loading" class="loading hidden" data-i18n="label.loading">読み込み中…</div>
+          </section>
+
+          <div class="stat-tiles">
+            <div class="stat-tile">
+              <div class="stat-label" data-i18n="th.quantity">数量</div>
+              <div class="stat-value" id="cs-tile-balance">—</div>
+            </div>
+            <div class="stat-tile">
+              <div class="stat-label" data-i18n="th.currentPrice">現在値</div>
+              <div class="stat-value" id="cs-tile-price">—</div>
+            </div>
+            <div class="stat-tile">
+              <div class="stat-label" data-i18n="th.value">評価額</div>
+              <div class="stat-value" id="cs-tile-value">—</div>
+            </div>
+            <div class="stat-tile">
+              <div class="stat-label" data-i18n="th.dayChange">前日比</div>
+              <div class="stat-value" id="cs-tile-day-change">—</div>
+            </div>
+          </div>
+
+          <section class="card">
+            <h2 data-i18n="cs.accountBreakdown">口座別内訳</h2>
+            <div class="table-wrap">
+              <table id="cs-asset-accounts-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="th.account">口座</th>
+                    <th class="num" data-i18n="th.quantity">数量</th>
+                    <th class="num" data-i18n="th.value">評価額</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </div>
+
+      <!-- 口座別ページ -->
+      <div id="page-accounts" class="page hidden">
+        <div id="accounts-list-view">
+          <h1 class="page-title" data-i18n="nav.accounts">口座別</h1>
+          <section class="card">
+            <p class="card-hint" data-i18n="label.accountsHint">クリックで推移チャートと保有内訳</p>
+            <div class="table-wrap">
+              <table id="accounts-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="th.account">口座</th>
+                    <th class="num" data-i18n="th.holdingCount">銘柄数</th>
+                    <th class="num" data-i18n="th.value">評価額</th>
+                    <th class="num" data-i18n="th.dayChange">前日比</th>
+                    <th class="num" data-i18n="th.pl">評価損益</th>
+                    <th class="num" data-i18n="th.plPct">損益率</th>
+                    <th class="num weight-col" data-i18n="th.weight">構成比</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+
+        <div id="account-detail-view" class="hidden">
+          <div class="detail-header">
+            <button id="account-back" class="back-btn" data-i18n="btn.backToAccounts">← 口座一覧</button>
+            <h1 class="page-title" id="account-detail-name"></h1>
+            <button id="account-edit-btn" class="action-btn" data-i18n="btn.editName">✎ 表示名を編集</button>
+          </div>
+
+          <div id="account-edit-panel" class="settings-panel hidden">
+            <h3 class="settings-title" data-i18n="label.accountEditTitle">表示名の編集</h3>
+            <div class="settings-row">
+              <label class="settings-label" data-i18n="label.displayName">表示名</label>
+              <input id="account-display-input" class="settings-input" type="text" />
+            </div>
+            <div class="settings-actions">
+              <button id="account-display-save" class="settings-save-btn" data-i18n="btn.save">保存</button>
+              <button id="account-display-cancel" class="link-btn" data-i18n="btn.cancel">キャンセル</button>
+            </div>
+            <div id="account-edit-result" class="settings-result hidden"></div>
+          </div>
+
+          <section class="hero">
+            <div class="hero-left">
+              <div class="hero-label" data-i18n="th.value">評価額</div>
+              <div class="hero-main">
+                <span class="hero-value" id="account-detail-total">—</span>
+                <span id="account-detail-jpy" class="hero-jpy"></span>
+              </div>
+              <div class="hero-pl" id="account-detail-pl"></div>
+              <div class="hero-day" id="account-detail-day"></div>
+              <div class="hero-note hidden" id="account-detail-note"></div>
+            </div>
+          </section>
+
+          <section class="card history-card">
+            <div class="history-header">
+              <h2 data-i18n="label.valueHistorySection">評価額推移</h2>
+              <div class="range-tabs" id="acct-range-tabs">
+                <button class="range-tab" data-range="7d">7D</button>
+                <button class="range-tab" data-range="30d">30D</button>
+                <button class="range-tab active" data-range="90d">90D</button>
+                <button class="range-tab" data-range="1y">1Y</button>
+                <button class="range-tab" data-range="all">ALL</button>
+              </div>
+            </div>
+            <div class="history-chart-wrap">
+              <canvas id="acct-history-chart"></canvas>
+              <p class="history-empty hidden" data-i18n="label.noHistData">推移データがありません</p>
+            </div>
+            <div id="acct-history-loading" class="loading hidden" data-i18n="label.loading">読み込み中…</div>
+            <div id="acct-history-unpriced" class="history-unpriced hidden"></div>
+          </section>
+
+          <section class="card">
+            <div class="table-wrap">
+              <table id="account-holdings-table" class="holdings-table sortable">
+                <thead>
+                  <tr>
+                    <th data-sort="name" data-i18n="th.security">銘柄</th>
+                    <th data-sort="account" data-i18n="th.account">口座</th>
+                    <th class="num" data-sort="quantity" data-i18n="th.quantity">数量</th>
+                    <th class="num" data-sort="avg_cost" data-i18n="th.avgCost">平均取得単価</th>
+                    <th class="num" data-sort="price" data-i18n="th.currentPrice">現在値</th>
+                    <th class="num" data-sort="value" data-i18n="th.value">評価額</th>
+                    <th class="num" data-sort="day_change" data-i18n="th.dayChange">前日比</th>
+                    <th class="num" data-sort="pl" data-i18n="th.pl">評価損益</th>
+                    <th class="num" data-sort="pl_pct" data-i18n="th.plPct">損益率</th>
+                    <th class="detail-toggle-cell"></th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <div id="account-detail-loading" class="loading hidden" data-i18n="label.loading">読み込み中…</div>
+          </section>
+        </div>
+      </div>
+
+      <!-- 保有一覧ページ -->
+      <div id="page-holdings" class="page hidden">
+        <div id="holdings-list-view">
+          <h1 class="page-title" data-i18n="nav.holdings">保有一覧</h1>
+          <div class="holdings-toolbar">
+            <div id="holdings-filter-chips" class="filter-chips"></div>
+            <input id="holdings-search" class="settings-input holdings-search" type="search"
+              data-i18n-placeholder="label.searchPlaceholder" placeholder="銘柄名・コード・口座で検索" />
+          </div>
+          <section class="card">
+            <div class="table-wrap">
+              <table id="holdings-table" class="holdings-table sortable">
+                <thead>
+                  <tr>
+                    <th data-sort="name" data-i18n="th.security">銘柄</th>
+                    <th data-sort="account" data-i18n="th.account">口座</th>
+                    <th class="num" data-sort="quantity" data-i18n="th.quantity">数量</th>
+                    <th class="num" data-sort="avg_cost" data-i18n="th.avgCost">平均取得単価</th>
+                    <th class="num" data-sort="price" data-i18n="th.currentPrice">現在値</th>
+                    <th class="num" data-sort="value" data-i18n="th.value">評価額</th>
+                    <th class="num" data-sort="day_change" data-i18n="th.dayChange">前日比</th>
+                    <th class="num" data-sort="pl" data-i18n="th.pl">評価損益</th>
+                    <th class="num" data-sort="pl_pct" data-i18n="th.plPct">損益率</th>
+                    <th class="detail-toggle-cell"></th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <div id="holdings-unpriced" class="unpriced hidden"></div>
+          </section>
+        </div>
+
+        <!-- 銘柄詳細 -->
+        <div id="security-detail-view" class="hidden">
+          <div class="detail-header">
+            <button id="security-back" class="back-btn" data-i18n="btn.backToHoldings">← 保有一覧</button>
+            <h1 class="page-title" id="security-detail-name"></h1>
+          </div>
+          <div id="security-detail-meta" class="security-meta"></div>
+          <div id="security-warnings" class="warnings hidden"></div>
+
+          <section class="card history-card">
+            <div class="history-header">
+              <h2 data-i18n="label.priceHistorySection">価格推移</h2>
+              <div class="range-tabs" id="sec-range-tabs">
+                <button class="range-tab" data-range="7d">7D</button>
+                <button class="range-tab" data-range="30d">30D</button>
+                <button class="range-tab" data-range="90d">90D</button>
+                <button class="range-tab active" data-range="1y">1Y</button>
+                <button class="range-tab" data-range="all">ALL</button>
+              </div>
+            </div>
+            <div class="history-chart-wrap">
+              <canvas id="price-chart"></canvas>
+              <p class="history-empty hidden" data-i18n="label.noPriceData">価格データがありません</p>
+            </div>
+            <div id="price-history-loading" class="loading hidden" data-i18n="label.loading">読み込み中…</div>
+          </section>
+
+          <div class="stat-tiles">
+            <div class="stat-tile"><div class="stat-label" data-i18n="th.quantity">数量</div><div class="stat-value" id="tile-quantity">—</div></div>
+            <div class="stat-tile"><div class="stat-label" data-i18n="th.avgCost">平均取得単価</div><div class="stat-value" id="tile-avg-cost">—</div></div>
+            <div class="stat-tile"><div class="stat-label" data-i18n="th.currentPrice">現在値</div><div class="stat-value" id="tile-price">—</div></div>
+            <div class="stat-tile"><div class="stat-label" data-i18n="th.value">評価額</div><div class="stat-value" id="tile-value">—</div></div>
+            <div class="stat-tile"><div class="stat-label" data-i18n="th.dayChange">前日比</div><div class="stat-value" id="tile-day-change">—</div></div>
+            <div class="stat-tile"><div class="stat-label" data-i18n="th.pl">評価損益</div><div class="stat-value" id="tile-pl">—</div></div>
+            <div class="stat-tile"><div class="stat-label" data-i18n="th.plPct">損益率</div><div class="stat-value" id="tile-pl-pct">—</div></div>
+          </div>
+
+          <section class="card">
+            <h2 data-i18n="label.accountBreakdown">口座別内訳</h2>
+            <div class="table-wrap">
+              <table id="security-accounts-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="th.account">口座</th>
+                    <th class="num" data-i18n="th.quantity">数量</th>
+                    <th class="num" data-i18n="th.avgCost">平均取得単価</th>
+                    <th class="num" data-i18n="th.value">評価額</th>
+                    <th class="num" data-i18n="th.dayChange">前日比</th>
+                    <th class="num" data-i18n="th.pl">評価損益</th>
+                    <th class="num" data-i18n="th.plPct">損益率</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="card">
+            <h2 data-i18n="label.lots">ロット一覧</h2>
+            <div class="table-wrap">
+              <table id="security-lots-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="th.account">口座</th>
+                    <th data-i18n="th.lot">ロット</th>
+                    <th data-i18n="th.lotLabel">ラベル</th>
+                    <th class="num" data-i18n="th.quantity">数量</th>
+                    <th class="num" data-i18n="th.avgCost">平均取得単価</th>
+                    <th data-i18n="tx.thAcquiredOn">取得日</th>
+                    <th data-i18n="th.asOf">基準日</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
+
+          <!-- 取引履歴から再計算した取得原価 -->
+          <section id="cb-card" class="card hidden">
+            <h2 data-i18n="tx.costBasisTitle">取引履歴からの取得原価</h2>
+            <div class="settings-row">
+              <button type="button" id="cb-recompute-btn" class="settings-save-btn secondary" data-i18n="tx.recompute">原価を再計算</button>
+              <span id="cb-recompute-result" class="import-note"></span>
+            </div>
+            <div id="cb-explain" class="card-hint"></div>
+            <div class="table-wrap">
+              <table id="cb-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="th.account">口座</th>
+                    <th data-i18n="tx.thCoverage">履歴の範囲</th>
+                    <th class="num" data-i18n="tx.thCovered">履歴で判明</th>
+                    <th class="num" data-i18n="tx.thResidual">取得日不明</th>
+                    <th class="num" data-i18n="tx.thResidualCost">その取得単価</th>
+                    <th data-i18n="tx.thAcquiredOn">取得日</th>
+                    <th class="num" data-i18n="tx.thRealized">実現損益</th>
+                    <th class="num" data-i18n="tx.thIncome">配当・分配金</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <div id="cb-warnings" class="warnings hidden"></div>
+          </section>
+
+          <!-- 取引履歴 -->
+          <section id="tx-history-card" class="card hidden">
+            <h2 data-i18n="tx.historyTitle">取引履歴</h2>
+            <div class="table-wrap">
+              <table id="tx-history-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="tx.thTradeDate">約定日</th>
+                    <th data-i18n="tx.thType">種類</th>
+                    <th data-i18n="th.account">口座</th>
+                    <th class="num" data-i18n="th.quantity">数量</th>
+                    <th class="num" data-i18n="tx.thUnitPrice">単価</th>
+                    <th class="num" data-i18n="tx.thNetAmount">受渡金額</th>
+                    <th data-i18n="tx.thLotLabel">口座区分</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <div class="settings-actions" style="margin-top:12px">
+              <button id="tx-history-more" class="link-btn hidden" data-i18n="tx.more">もっと見る</button>
+            </div>
+          </section>
+          <div id="security-detail-loading" class="loading hidden" data-i18n="label.loading">読み込み中…</div>
+        </div>
+      </div>
+
+      <!-- Myポートフォリオページ -->
+      <div id="page-portfolios" class="page hidden">
+        <div id="portfolios-list-view">
+          <h1 class="page-title" data-i18n="nav.portfolios">Myポートフォリオ</h1>
+          <p class="card-hint" data-i18n="pf.intro">銘柄にタグを付けて、テーマ別のポートフォリオとしてまとめられます。オルカンのように複数の資産を含む投信は、タグごとの配分率（%）で按分できます。</p>
+
+          <!-- 未配分の警告 -->
+          <div id="unalloc-banner" class="warnings hidden"></div>
+
+          <!-- 全保有のタグ別サマリー -->
+          <section class="card chart-card">
+            <h2 data-i18n="pf.tagSummary">タグ別サマリー（全保有）</h2>
+            <div class="chart-wrap">
+              <canvas id="tagsum-chart"></canvas>
+            </div>
+            <div class="chart-card-detail">
+              <div class="table-wrap">
+                <table id="tagsum-table" class="clickable-rows">
+                  <thead>
+                    <tr>
+                      <th data-i18n="pf.tagName">タグ</th>
+                      <th class="num" data-i18n="th.value">評価額</th>
+                      <th class="num" data-i18n="th.dayChange">前日比</th>
+                      <th class="num weight-col" data-i18n="th.weight">構成比</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+                <p class="card-hint" data-i18n="pf.tagClickHint">タグをクリックすると、そのタグに入っている銘柄と計上額が見られます。</p>
+              </div>
+              <div id="tagsum-empty" class="empty-state hidden">
+                <p data-i18n="pf.noTags">まだタグが設定されていません。下の「タグ管理」でタグを作り、銘柄に割り当ててください。</p>
+              </div>
+            </div>
+          </section>
+
+          <!-- ポートフォリオ一覧 -->
+          <section class="card">
+            <h2 data-i18n="pf.listTitle">Myポートフォリオ</h2>
+            <div class="settings-row">
+              <button id="pf-new-btn" class="btn-primary" data-i18n="pf.add">＋ ポートフォリオを追加</button>
+            </div>
+            <div id="pf-form" class="settings-panel hidden">
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="pf.name">名前</label>
+                <input id="pf-name" class="settings-input" type="text" />
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="pf.note">メモ</label>
+                <input id="pf-note" class="settings-input" type="text" />
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="pf.tags">対象タグ</label>
+                <div id="pf-tag-picker" class="tag-picker"></div>
+              </div>
+              <p class="card-hint" data-i18n="pf.tagHint">選んだタグの配分率ぶんだけ計上されます（例: 国内株式のみ選ぶと、オルカンは日本株の配分ぶんだけ入ります）。</p>
+              <div class="settings-actions">
+                <button id="pf-save" class="btn-primary" data-i18n="btn.save">保存</button>
+                <button id="pf-cancel" class="btn-secondary" data-i18n="btn.cancel">キャンセル</button>
+              </div>
+              <div id="pf-form-result" class="settings-result hidden"></div>
+            </div>
+            <div class="table-wrap">
+              <table id="pf-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="pf.name">名前</th>
+                    <th data-i18n="pf.tags">対象タグ</th>
+                    <th class="num" data-i18n="th.holdingCount">銘柄数</th>
+                    <th class="num" data-i18n="th.value">評価額</th>
+                    <th class="num" data-i18n="th.dayChange">前日比</th>
+                    <th class="num" data-i18n="th.pl">評価損益</th>
+                    <th class="num" data-i18n="th.plPct">損益率</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <div id="pf-empty" class="empty-state hidden">
+              <p data-i18n="pf.emptyList">まだポートフォリオがありません。</p>
+            </div>
+          </section>
+
+          <!-- タグ管理 -->
+          <section class="card">
+            <h2 data-i18n="pf.tagManage">タグ管理</h2>
+            <p class="card-hint" data-i18n="pf.tagManageHint">タグ名と色は一覧の中で直接変更できます（作り直す必要はありません）。色は見やすさを確認したパレットから選ぶか、右端のピッカーで自由に指定できます。</p>
+            <div class="settings-row">
+              <input id="tag-new-name" class="settings-input" type="text"
+                data-i18n-placeholder="pf.tagNamePlaceholder" placeholder="タグ名（例: 世界株）" />
+              <input id="tag-new-color" type="color" class="color-input" value="#2f81f7" />
+              <button id="tag-add" class="btn-primary" data-i18n="pf.tagAdd">タグを追加</button>
+            </div>
+            <div id="tag-add-result" class="settings-result hidden"></div>
+            <div class="table-wrap">
+              <table id="tag-table" class="holdings-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="pf.tagName">タグ</th>
+                    <th data-i18n="pf.tagColor">色</th>
+                    <th class="num" data-i18n="pf.tagSecurityCount">設定銘柄数</th>
+                    <th class="num" data-i18n="th.value">評価額</th>
+                    <th class="num" data-i18n="th.dayChange">前日比</th>
+                    <th class="num" data-i18n="th.weight">構成比</th>
+                    <th class="num" data-i18n="th.actions">操作</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
+
+          <!-- タグの自動配分（ルールベース） -->
+          <section class="card">
+            <h2 data-i18n="pf.autoalloc.title">自動配分</h2>
+            <p class="card-hint" data-i18n="pf.autoalloc.hint">銘柄名・証券コード・資産クラスからタグ配分を推定して提案します。適用する行だけにチェックしてください。配分済みの銘柄への変更提案は、手作業の設定を上書きしないよう既定では未チェックです。</p>
+            <div class="settings-row">
+              <button id="autoalloc-suggest-btn" class="btn-primary" data-i18n="pf.autoalloc.suggestBtn">自動配分を提案</button>
+            </div>
+            <div id="autoalloc-suggest-result" class="settings-result hidden"></div>
+            <div id="autoalloc-warnings" class="warnings hidden"></div>
+            <div id="autoalloc-results" class="autoalloc-results hidden">
+              <div id="autoalloc-summary" class="section-chips"></div>
+              <div class="holdings-toolbar">
+                <div class="filter-chips">
+                  <button id="autoalloc-filter-actionable" class="filter-chip active" data-i18n="pf.autoalloc.filterActionable">提案のみ</button>
+                  <button id="autoalloc-filter-all" class="filter-chip" data-i18n="pf.autoalloc.filterAll">すべて</button>
+                </div>
+              </div>
+              <div class="table-wrap">
+                <table id="autoalloc-table">
+                  <thead>
+                    <tr>
+                      <th><input type="checkbox" id="autoalloc-check-all" /></th>
+                      <th data-i18n="pf.autoalloc.thSecurity">銘柄</th>
+                      <th data-i18n="pf.autoalloc.thVerdict">判定</th>
+                      <th data-i18n="pf.autoalloc.thCurrent">現在の配分</th>
+                      <th data-i18n="pf.autoalloc.thSuggested">提案する配分</th>
+                      <th data-i18n="pf.autoalloc.thRule">判定根拠</th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+              <p id="autoalloc-empty" class="card-hint hidden" data-i18n="pf.autoalloc.noChanges">変更が必要な銘柄はありません。すべてルール通りに配分済みです。</p>
+              <div class="settings-actions">
+                <button id="autoalloc-apply-btn" class="btn-primary" data-i18n="pf.autoalloc.applyBtn">選択した配分を適用</button>
+              </div>
+              <div id="autoalloc-apply-result" class="settings-result hidden"></div>
+            </div>
+          </section>
+
+          <!-- 銘柄へのタグ割当 -->
+          <section class="card">
+            <h2 data-i18n="pf.assign">銘柄へのタグ割当</h2>
+            <div class="holdings-toolbar">
+              <div class="filter-chips">
+                <button id="assign-filter-all" class="filter-chip active" data-i18n="pf.filterAll">すべて</button>
+                <button id="assign-filter-unalloc" class="filter-chip" data-i18n="pf.filterUnallocated">未配分のみ</button>
+              </div>
+              <input id="tag-assign-search" class="settings-input holdings-search" type="search"
+                data-i18n-placeholder="pf.assignSearch" placeholder="銘柄名で絞り込み" />
+            </div>
+            <p class="card-hint" data-i18n="pf.assignHint">配分率の合計が100%未満のぶんは「未分類」として集計されます。1つのタグに全額なら100と入力してください。</p>
+            <div id="tag-assign-list" class="assign-list"></div>
+          </section>
+        </div>
+
+        <!-- ポートフォリオ詳細 -->
+        <div id="pf-detail-view" class="hidden">
+          <div class="detail-header">
+            <button id="pf-back" class="back-btn" data-i18n="pf.backToList">← Myポートフォリオ</button>
+            <h1 class="page-title" id="pf-detail-name"></h1>
+          </div>
+          <div id="pf-detail-meta" class="security-meta"></div>
+
+          <section class="hero">
+            <div class="hero-left">
+              <div class="hero-label" data-i18n="th.value">評価額</div>
+              <div class="hero-main">
+                <span class="hero-value" id="pf-detail-total">—</span>
+                <span id="pf-detail-jpy" class="hero-jpy"></span>
+              </div>
+              <div class="hero-pl" id="pf-detail-pl"></div>
+              <div class="hero-day" id="pf-detail-day"></div>
+              <div class="hero-note hidden" id="pf-detail-note"></div>
+            </div>
+          </section>
+
+          <section class="card history-card">
+            <div class="history-header">
+              <h2 data-i18n="label.valueHistorySection">評価額推移</h2>
+              <div class="range-tabs" id="pf-range-tabs">
+                <button class="range-tab" data-range="7d">7D</button>
+                <button class="range-tab" data-range="30d">30D</button>
+                <button class="range-tab active" data-range="90d">90D</button>
+                <button class="range-tab" data-range="1y">1Y</button>
+                <button class="range-tab" data-range="all">ALL</button>
+              </div>
+            </div>
+            <div class="history-chart-wrap">
+              <canvas id="pf-history-chart"></canvas>
+              <p class="history-empty hidden" data-i18n="label.noHistData">推移データがありません</p>
+            </div>
+            <div id="pf-history-loading" class="loading hidden" data-i18n="label.loading">読み込み中…</div>
+            <div id="pf-history-unpriced" class="history-unpriced hidden"></div>
+          </section>
+
+          <section class="card chart-card" data-card="pf-tag">
+            <h2 data-i18n="pf.byTag">タグ別</h2>
+            <div class="chart-wrap">
+              <canvas id="pf-tag-chart"></canvas>
+            </div>
+            <div class="chart-card-detail">
+              <div class="table-wrap">
+                <table id="pf-tag-table">
+                  <thead><tr>
+                    <th data-i18n="pf.tagName">タグ</th>
+                    <th class="num" data-i18n="th.value">評価額</th>
+                    <th class="num" data-i18n="th.dayChange">前日比</th>
+                    <th class="num weight-col" data-i18n="th.weight">構成比</th>
+                  </tr></thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+            </div>
+          </section>
+
+          <section class="card">
+            <h2 data-i18n="pf.byCurrency">通貨別</h2>
+            <div class="table-wrap">
+              <table id="pf-currency-table">
+                <thead><tr>
+                  <th data-i18n="label.currency">通貨</th>
+                  <th class="num" data-i18n="th.value">評価額</th>
+                  <th class="num" data-i18n="th.dayChange">前日比</th>
+                  <th class="num weight-col" data-i18n="th.weight">構成比</th>
+                </tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="card">
+            <h2 data-i18n="pf.byClass">資産クラス別</h2>
+            <div class="table-wrap">
+              <table id="pf-class-table">
+                <thead><tr>
+                  <th data-i18n="th.class">資産クラス</th>
+                  <th class="num" data-i18n="th.value">評価額</th>
+                  <th class="num" data-i18n="th.dayChange">前日比</th>
+                  <th class="num weight-col" data-i18n="th.weight">構成比</th>
+                </tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="card">
+            <h2 data-i18n="pf.byAccount">口座別</h2>
+            <div class="table-wrap">
+              <table id="pf-account-table">
+                <thead><tr>
+                  <th data-i18n="th.account">口座</th>
+                  <th class="num" data-i18n="th.value">評価額</th>
+                  <th class="num" data-i18n="th.dayChange">前日比</th>
+                  <th class="num weight-col" data-i18n="th.weight">構成比</th>
+                </tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="card">
+            <h2 data-i18n="pf.members">構成銘柄</h2>
+            <div class="table-wrap">
+              <table id="pf-holdings-table" class="holdings-table sortable">
+                <thead><tr>
+                  <th data-sort="name" data-i18n="th.security">銘柄</th>
+                  <th data-sort="account" data-i18n="th.account">口座</th>
+                  <th class="num" data-sort="quantity" data-i18n="th.quantity">数量</th>
+                  <th class="num" data-sort="avg_cost" data-i18n="th.avgCost">平均取得単価</th>
+                  <th class="num" data-sort="price" data-i18n="th.currentPrice">現在値</th>
+                  <th class="num" data-sort="value" data-i18n="th.value">評価額</th>
+                  <th class="num" data-sort="day_change" data-i18n="th.dayChange">前日比</th>
+                  <th class="num" data-sort="pl" data-i18n="th.pl">評価損益</th>
+                  <th class="num" data-sort="pl_pct" data-i18n="th.plPct">損益率</th>
+                  <th class="pf-tag-col" data-i18n="pf.tags">タグ</th>
+                  <th class="num" data-sort="portfolio_value" data-i18n="pf.countedValueRatio">計上額（計上率）</th>
+                  <th class="detail-toggle-cell"></th>
+                </tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
+          <div id="pf-detail-loading" class="loading hidden" data-i18n="label.loading">読み込み中…</div>
+        </div>
+      </div>
+
+      <!-- 取込ページ -->
+      <div id="page-import" class="page hidden">
+        <h1 class="page-title" data-i18n="nav.import">取込</h1>
+
+        <div class="import-tabs">
+          <button class="import-tab source-tab active" data-source="pdf" data-i18n="import.tabPdf">資産内訳PDF</button>
+          <button class="import-tab source-tab" data-source="tx" data-i18n="import.tabTx">取引履歴</button>
+        </div>
+
+        <div id="import-tab-pdf" class="source-tab-content">
+        <section class="card import-section">
+          <h2 data-i18n="import.uploadTitle">マネーフォワードME 資産内訳PDFの取込</h2>
+          <p class="card-hint" data-i18n="import.uploadHint">マネーフォワードMEの「資産内訳」ページを印刷保存したPDFを選択してください。解析後、内容を確認してから取込を確定できます。</p>
+          <div class="settings-row">
+            <label class="settings-label" data-i18n="import.pdfFile">PDFファイル</label>
+            <input id="import-file" type="file" accept=".pdf,application/pdf" class="file-input" />
+          </div>
+          <div class="settings-row">
+            <label class="settings-label" data-i18n="import.asOf">基準日（この日付のスナップショットとして保存）</label>
+            <input id="import-as-of" type="date" class="filter-date" style="max-width:200px" />
+          </div>
+          <div class="settings-actions">
+            <button id="import-parse-btn" class="settings-save-btn" data-i18n="import.parseBtn">解析してプレビュー</button>
+          </div>
+          <div id="import-upload-result" class="settings-result hidden"></div>
+        </section>
+
+        <!-- 解析プレビュー -->
+        <section id="import-preview" class="card import-section hidden">
+          <h2 data-i18n="import.previewTitle">取込プレビュー</h2>
+          <div id="import-report-summary" class="import-note"></div>
+          <div id="import-section-chips" class="section-chips"></div>
+          <div class="table-wrap">
+            <table id="import-diff-table">
+              <thead>
+                <tr>
+                  <th data-i18n="th.include">取込</th>
+                  <th data-i18n="th.status">状態</th>
+                  <th data-i18n="th.security">銘柄</th>
+                  <th data-i18n="th.account">口座</th>
+                  <th class="num" data-i18n="th.quantity">数量</th>
+                  <th class="num" data-i18n="th.avgCost">平均取得単価</th>
+                  <th class="num" data-i18n="th.value">評価額</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="settings-actions" style="margin-top:16px">
+            <button id="import-commit-btn" class="settings-save-btn" data-i18n="import.commitBtn">取込を確定</button>
+            <button id="import-cancel-btn" class="link-btn" data-i18n="btn.cancel">キャンセル</button>
+          </div>
+          <div id="import-commit-result" class="settings-result hidden"></div>
+        </section>
+
+        <!-- 受信フォルダ（自動取込） -->
+        <section class="card import-section">
+          <h2 data-i18n="inbox.title">受信フォルダ（自動取込）</h2>
+          <p class="card-hint" data-i18n="inbox.hint">受信フォルダにマネーフォワードMEのPDFを置くと、自動で解析・取込されます（基準日はPDFの作成日）。検算が一致しないPDFは自動確定せず failed/ へ移動するので、上のフォームから手動で取り込んでください。</p>
+          <div id="inbox-status" class="import-note"></div>
+          <div class="settings-actions">
+            <button id="inbox-scan-btn" class="settings-save-btn" data-i18n="inbox.scanBtn">今すぐスキャン</button>
+          </div>
+          <div id="inbox-scan-result" class="settings-result hidden"></div>
+          <div class="table-wrap">
+            <table id="inbox-events-table">
+              <thead>
+                <tr>
+                  <th data-i18n="inbox.thAt">日時</th>
+                  <th data-i18n="th.file">ファイル</th>
+                  <th data-i18n="inbox.thResult">結果</th>
+                  <th data-i18n="inbox.thDetail">詳細</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+        </div>
+
+        <!-- 取引履歴の取込（CSV / Excel / 貼り付け） -->
+        <div id="import-tab-tx" class="source-tab-content hidden">
+          <section class="card import-section">
+            <h2 data-i18n="tx.uploadTitle">証券会社の取引履歴の取込</h2>
+            <p class="card-hint" data-i18n="tx.uploadHint">証券会社ごとの書式に合わせる必要はありません。列の意味は中身から自動で判定し、結果は次の画面で確認・修正できます。CSV / TSV / Excel、または画面からコピーした表を貼り付けられます。</p>
+            <div class="settings-row">
+              <label class="settings-label" data-i18n="tx.account">口座 *</label>
+              <input id="tx-account" class="settings-input" type="text" list="account-name-list" data-i18n-placeholder="tx.accountPh" placeholder="例: 楽天証券" />
+            </div>
+            <p class="card-hint" data-i18n="tx.accountHint">取引履歴のファイルには証券会社名が入っていないことがほとんどなので、どこの口座かを指定してください。</p>
+            <div class="settings-row">
+              <label class="settings-label" data-i18n="tx.file">ファイル</label>
+              <input id="tx-file" type="file" accept=".csv,.tsv,.txt,.xlsx,text/csv" class="file-input" />
+            </div>
+            <div class="settings-row">
+              <label class="settings-label" data-i18n="tx.paste">または貼り付け</label>
+              <textarea id="tx-paste" class="settings-input" rows="4" data-i18n-placeholder="tx.pastePh" placeholder="証券会社の画面から表をコピーして貼り付け"></textarea>
+            </div>
+            <div class="settings-actions">
+              <button id="tx-parse-btn" class="settings-save-btn" data-i18n="tx.parseBtn">解析してプレビュー</button>
+            </div>
+            <div id="tx-upload-result" class="settings-result hidden"></div>
+          </section>
+
+          <!-- 判定した列の対応 -->
+          <section id="tx-mapping-card" class="card import-section hidden">
+            <h2 data-i18n="tx.mappingTitle">列の対応</h2>
+            <p class="card-hint" data-i18n="tx.mappingHint">自動判定した対応です。違っていればここで直してから再解析してください。</p>
+            <div id="tx-detection-summary" class="import-note"></div>
+            <div class="table-wrap">
+              <table id="tx-mapping-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="tx.thHeader">見出し</th>
+                    <th data-i18n="tx.thSample">値の例</th>
+                    <th data-i18n="tx.thField">対応</th>
+                    <th data-i18n="tx.thEvidence">判定の根拠</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <div class="settings-actions" style="margin-top:16px">
+              <button id="tx-remap-btn" class="settings-save-btn" data-i18n="tx.remapBtn">この対応で再解析</button>
+            </div>
+          </section>
+
+          <!-- 未照合の銘柄 -->
+          <section id="tx-unmatched-card" class="card import-section hidden">
+            <h2 data-i18n="tx.unmatchedTitle">銘柄の結びつけ</h2>
+            <div id="tx-link-notices" class="import-note hidden"></div>
+            <p class="card-hint" data-i18n="tx.unmatchedHint">約定単価が既存銘柄の価格と一致したものは自動で結びつけてあります。残りを選んでください。一度結びつければ、次回から同じ表記は自動で当たります。</p>
+            <div id="tx-unexplained" class="import-note hidden"></div>
+            <div id="tx-unmatched-bulk" class="settings-row">
+              <span id="tx-unmatched-count" class="import-note"></span>
+              <button type="button" id="tx-bulk-sold" class="settings-save-btn secondary">—</button>
+              <button type="button" id="tx-bulk-reset" class="settings-save-btn secondary" data-i18n="tx.bulkReset">選択をすべて解除（取り込まない）</button>
+            </div>
+            <div class="table-wrap">
+              <table id="tx-unmatched-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="tx.thCsvName">ファイル上の名前</th>
+                    <th class="num" data-i18n="tx.thRows">件数</th>
+                    <th class="num" data-i18n="tx.thFileBalance" data-i18n-title="tx.thFileBalanceHelp" title="このファイルの行だけを足し引きした増減です">ファイル上の増減</th>
+                    <th data-i18n="tx.thLinkEvidence">根拠</th>
+                    <th data-i18n="tx.thLinkTo">結びつける銘柄</th>
+                    <th data-i18n="tx.thHeld">現在の保有</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
+
+          <!-- 取引プレビュー -->
+          <section id="tx-preview" class="card import-section hidden">
+            <h2 data-i18n="tx.previewTitle">取引プレビュー</h2>
+            <div id="tx-preview-summary" class="import-note"></div>
+            <div id="tx-type-bulk" class="settings-row hidden">
+              <span id="tx-type-bulk-note" class="import-note"></span>
+              <select id="tx-type-bulk-select" class="settings-input"></select>
+              <button type="button" id="tx-type-bulk-apply" class="settings-save-btn secondary" data-i18n="tx.typeBulkApply">まとめて指定</button>
+            </div>
+            <div class="table-wrap">
+              <table id="tx-rows-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="th.include">取込</th>
+                    <th data-i18n="tx.thTradeDate">約定日</th>
+                    <th data-i18n="tx.thType">種類</th>
+                    <th data-i18n="th.security">銘柄</th>
+                    <th class="num" data-i18n="th.quantity">数量</th>
+                    <th class="num" data-i18n="tx.thUnitPrice">単価</th>
+                    <th class="num" data-i18n="tx.thNetAmount">受渡金額</th>
+                    <th data-i18n="tx.thLotLabel">口座区分</th>
+                    <th data-i18n="th.status">状態</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <div class="settings-actions" style="margin-top:16px">
+              <button id="tx-commit-btn" class="settings-save-btn" data-i18n="tx.commitBtn">取込を確定</button>
+              <button id="tx-cancel-btn" class="link-btn" data-i18n="btn.cancel">キャンセル</button>
+            </div>
+            <div id="tx-commit-result" class="settings-result hidden"></div>
+          </section>
+        </div>
+
+        <!-- 取込履歴 -->
+        <section class="card import-section">
+          <h2 data-i18n="import.historyTitle">取込履歴</h2>
+          <p class="card-hint" data-i18n="import.historyHint">削除すると、その取込で作られたスナップショットがまとめて巻き戻されます</p>
+          <div class="table-wrap">
+            <table id="import-history-table">
+              <thead>
+                <tr>
+                  <th data-i18n="th.importedAt">取込日時</th>
+                  <th data-i18n="th.file">ファイル</th>
+                  <th data-i18n="th.asOf">基準日</th>
+                  <th class="num" data-i18n="th.rowCount">行数</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      <!-- 手動登録ページ -->
+      <div id="page-manage" class="page hidden">
+        <h1 class="page-title" data-i18n="nav.manage">手動登録</h1>
+
+        <div class="import-tabs">
+          <button class="import-tab manage-tab active" data-tab="sec" data-i18n="manage.tabSecurities">銘柄・保有</button>
+          <button class="import-tab manage-tab" data-tab="cash" data-i18n="manage.tabCash">現金・預金</button>
+          <button class="import-tab manage-tab" data-tab="metal" data-i18n="manage.tabMetal">貴金属</button>
+          <button class="import-tab manage-tab" data-tab="estate" data-i18n="manage.tabEstate">不動産</button>
+          <button class="import-tab manage-tab" data-tab="crypto" data-i18n="manage.tabCrypto">暗号資産</button>
+          <button class="import-tab manage-tab" data-tab="pension" data-i18n="manage.tabPension">年金・ポイント</button>
+        </div>
+
+        <!-- 銘柄・保有タブ -->
+        <div id="manage-tab-sec" class="manage-tab-content">
+          <section class="card import-section">
+            <h2 data-i18n="manage.newSecurity">新規銘柄</h2>
+            <div class="manual-add-grid">
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.secName">銘柄名 *</label>
+                <input id="ns-name" class="settings-input" type="text" data-i18n-placeholder="manage.secNamePh" placeholder="例: KDDI / eMAXIS Slim 全世界株式" />
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.secCode">証券コード</label>
+                <input id="ns-code" class="settings-input" type="text" placeholder="9433" />
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="th.assetClass">資産クラス</label>
+                <select id="ns-class" class="settings-input"></select>
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="label.currency">通貨</label>
+                <select id="ns-currency" class="settings-input">
+                  <option value="JPY">JPY</option>
+                  <option value="USD">USD</option>
+                  <option value="EUR">EUR</option>
+                  <option value="GBP">GBP</option>
+                </select>
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.unit">単位</label>
+                <select id="ns-unit" class="settings-input">
+                  <option value="share" data-i18n="unit.share">株</option>
+                  <option value="kuchi" data-i18n="unit.kuchi">口（投信）</option>
+                  <option value="gram" data-i18n="unit.gram">グラム</option>
+                  <option value="currency" data-i18n="unit.currency">通貨残高</option>
+                  <option value="unit" data-i18n="unit.unit">件</option>
+                  <option value="point" data-i18n="unit.point">ポイント</option>
+                </select>
+              </div>
+            </div>
+            <div class="settings-actions">
+              <button id="ns-save" class="settings-save-btn" data-i18n="btn.add">追加</button>
+            </div>
+            <div id="ns-result" class="settings-result hidden"></div>
+          </section>
+
+          <section class="card import-section">
+            <h2 data-i18n="manage.newHolding">保有を追加</h2>
+            <div class="manual-add-grid">
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.security">銘柄 *</label>
+                <select id="nh-security" class="settings-input"></select>
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.account">口座名 *</label>
+                <input id="nh-account" class="settings-input" type="text" list="account-name-list"
+                  data-i18n-placeholder="manage.accountPh" placeholder="例: 楽天証券" />
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="th.quantity">数量 *</label>
+                <input id="nh-quantity" class="settings-input" type="number" step="any" />
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="th.avgCost">平均取得単価</label>
+                <input id="nh-avg-cost" class="settings-input" type="number" step="any" />
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="th.asOf">基準日</label>
+                <input id="nh-as-of" class="settings-input" type="date" />
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="th.lotLabel">ラベル（NISA等・任意）</label>
+                <input id="nh-lot-label" class="settings-input" type="text" placeholder="NISA" />
+              </div>
+            </div>
+            <div class="settings-actions">
+              <button id="nh-save" class="settings-save-btn" data-i18n="btn.add">追加</button>
+            </div>
+            <div id="nh-result" class="settings-result hidden"></div>
+          </section>
+
+          <section class="card import-section">
+            <h2 data-i18n="manage.securitiesList">銘柄一覧</h2>
+            <p class="card-hint" data-i18n="manage.securitiesListHint">貴金属・不動産・現金なども含め、登録した銘柄はすべてここに出ます。右端の「削除」で消せます（保有が残っている銘柄は先に下の表から保有を消してください）。</p>
+            <div class="table-wrap">
+              <table id="securities-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="th.security">銘柄</th>
+                    <th data-i18n="th.code">コード</th>
+                    <th data-i18n="th.assetClass">資産クラス</th>
+                    <th data-i18n="label.currency">通貨</th>
+                    <th data-i18n="th.priceSource">価格ソース</th>
+                    <th class="num" data-i18n="th.actions">操作</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="card import-section">
+            <h2 data-i18n="manage.holdingsList">登録済み保有（最新スナップショット）</h2>
+            <p class="card-hint" data-i18n="manage.holdingsListHint">手動で登録した保有も、PDFから取り込んだ保有もここに出ます。右端の「削除」でその1件を消せます。</p>
+            <div class="table-wrap">
+              <table id="manage-holdings-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="th.security">銘柄</th>
+                    <th data-i18n="th.account">口座</th>
+                    <th data-i18n="th.lotLabel">ラベル</th>
+                    <th class="num" data-i18n="th.quantity">数量</th>
+                    <th class="num" data-i18n="th.avgCost">平均取得単価</th>
+                    <th data-i18n="th.asOf">基準日</th>
+                    <th class="num" data-i18n="th.actions">操作</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+
+        <!-- 現金・預金タブ -->
+        <div id="manage-tab-cash" class="manage-tab-content hidden">
+          <section class="card import-section">
+            <h2 data-i18n="manage.cashTitle">現金・預金の登録</h2>
+            <p class="card-hint" data-i18n="manage.cashHint">同じ名前・通貨の銘柄があれば再利用し、残高スナップショットを追加します。</p>
+            <div class="manual-add-grid">
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.cashName">名称 *</label>
+                <input id="cash-name" class="settings-input" type="text" data-i18n-placeholder="manage.cashNamePh" placeholder="例: 普通預金" />
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.account">口座名 *</label>
+                <input id="cash-account" class="settings-input" type="text" list="cash-account-list" data-i18n-placeholder="manage.cashAccountPh" placeholder="例: 三菱UFJ銀行 / 自宅保管" />
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="label.currency">通貨</label>
+                <select id="cash-currency" class="settings-input">
+                  <option value="JPY">JPY</option>
+                  <option value="USD">USD</option>
+                  <option value="EUR">EUR</option>
+                  <option value="GBP">GBP</option>
+                </select>
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.balance">残高 *</label>
+                <input id="cash-amount" class="settings-input" type="number" step="any" />
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="th.asOf">基準日</label>
+                <input id="cash-as-of" class="settings-input" type="date" />
+              </div>
+            </div>
+            <div class="settings-actions">
+              <button id="cash-save" class="settings-save-btn" data-i18n="btn.add">追加</button>
+            </div>
+            <div id="cash-result" class="settings-result hidden"></div>
+          </section>
+
+          <section class="card import-section">
+            <h2 data-i18n="manage.cashList">登録済みの現金・預金</h2>
+            <div class="table-wrap">
+              <table id="cash-list-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="th.security">銘柄</th>
+                    <th data-i18n="th.account">口座</th>
+                    <th class="num" data-i18n="th.quantity">数量</th>
+                    <th class="num" data-i18n="th.value">評価額</th>
+                    <th data-i18n="th.asOf">基準日</th>
+                    <th class="num" data-i18n="th.actions">操作</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <div id="cash-list-empty" class="empty-state hidden">
+              <p data-i18n="manage.listEmpty">まだ登録がありません。</p>
+            </div>
+          </section>
+        </div>
+
+        <!-- 貴金属タブ -->
+        <div id="manage-tab-metal" class="manage-tab-content hidden">
+          <section class="card import-section">
+            <h2 data-i18n="manage.metalTitle">現物貴金属の登録</h2>
+            <p class="card-hint" data-i18n="manage.metalHint">金・銀・プラチナの現物をグラム数で登録します。価格は市場価格（円/g）に自動連動します。</p>
+            <div class="manual-add-grid">
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.metalKind">種類</label>
+                <select id="metal-kind" class="settings-input">
+                  <option value="XAU" data-i18n="metal.gold">金</option>
+                  <option value="XAG" data-i18n="metal.silver">銀</option>
+                  <option value="XPT" data-i18n="metal.platinum">プラチナ</option>
+                </select>
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.account">口座名 *</label>
+                <input id="metal-account" class="settings-input" type="text" list="metal-account-list" data-i18n-placeholder="manage.metalAccountPh" placeholder="例: 田中貴金属 / 自宅保管" />
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.grams">グラム数 *</label>
+                <input id="metal-grams" class="settings-input" type="number" step="any" />
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.costPerGram">取得単価（円/g）</label>
+                <input id="metal-cost" class="settings-input" type="number" step="any" />
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="th.asOf">基準日</label>
+                <input id="metal-as-of" class="settings-input" type="date" />
+              </div>
+            </div>
+            <div class="settings-actions">
+              <button id="metal-save" class="settings-save-btn" data-i18n="btn.add">追加</button>
+            </div>
+            <div id="metal-result" class="settings-result hidden"></div>
+          </section>
+
+          <section class="card import-section">
+            <h2 data-i18n="manage.metalList">登録済みの貴金属</h2>
+            <div class="table-wrap">
+              <table id="metal-list-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="th.security">銘柄</th>
+                    <th data-i18n="th.account">口座</th>
+                    <th class="num" data-i18n="th.quantity">数量</th>
+                    <th class="num" data-i18n="th.value">評価額</th>
+                    <th data-i18n="th.asOf">基準日</th>
+                    <th class="num" data-i18n="th.actions">操作</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <div id="metal-list-empty" class="empty-state hidden">
+              <p data-i18n="manage.listEmpty">まだ登録がありません。</p>
+            </div>
+          </section>
+        </div>
+
+        <!-- 不動産タブ -->
+        <div id="manage-tab-estate" class="manage-tab-content hidden">
+          <section class="card import-section">
+            <h2 data-i18n="manage.estateTitle">不動産の登録</h2>
+            <p class="card-hint" data-i18n="manage.estateHint">取得価額で登録し、評価額は下の「評価履歴」から日付ごとに追加します。</p>
+            <div class="manual-add-grid">
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.estateName">物件名 *</label>
+                <input id="re-name" class="settings-input" type="text" data-i18n-placeholder="manage.estateNamePh" placeholder="例: 自宅マンション" />
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.account">口座名 *</label>
+                <input id="re-account" class="settings-input" type="text" list="account-name-list" value="不動産" />
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.acquisitionCost">取得価額（円） *</label>
+                <input id="re-cost" class="settings-input" type="number" step="any" />
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="th.asOf">基準日</label>
+                <input id="re-as-of" class="settings-input" type="date" />
+              </div>
+            </div>
+            <div class="settings-actions">
+              <button id="re-save" class="settings-save-btn" data-i18n="btn.add">追加</button>
+            </div>
+            <div id="re-result" class="settings-result hidden"></div>
+          </section>
+
+          <section class="card import-section">
+            <h2 data-i18n="manage.estateValTitle">評価履歴</h2>
+            <div class="manual-add-grid">
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.estateSelect">物件</label>
+                <select id="re-select" class="settings-input"></select>
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.valDate">評価日 *</label>
+                <input id="re-val-date" class="settings-input" type="date" />
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.valValue">評価額（円） *</label>
+                <input id="re-val-value" class="settings-input" type="number" step="any" />
+              </div>
+            </div>
+            <div class="settings-actions">
+              <button id="re-val-add" class="settings-save-btn" data-i18n="btn.add">追加</button>
+            </div>
+            <div id="re-val-result" class="settings-result hidden"></div>
+            <div class="table-wrap" style="margin-top:12px">
+              <table id="re-val-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="manage.valDate">評価日</th>
+                    <th class="num" data-i18n="manage.valValue">評価額（円）</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="card import-section">
+            <h2 data-i18n="manage.estateIndexTitle">相場指数との連携</h2>
+            <p class="card-hint" data-i18n="manage.estateIndexHint">国土交通省の不動産価格指数で、査定額の間を補間し、最終査定日より後を延長します。連携しなければ査定額だけで描きます。</p>
+            <div class="manual-add-grid">
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.estateSelect">物件</label>
+                <select id="re-index-sec" class="settings-input"></select>
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.estateIndexRegion">地域</label>
+                <select id="re-index-region" class="settings-input"></select>
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.estateIndexType">種別</label>
+                <select id="re-index-type" class="settings-input"></select>
+              </div>
+            </div>
+            <div class="settings-actions">
+              <button id="re-index-save" class="settings-save-btn" data-i18n="btn.save">保存</button>
+            </div>
+            <div id="re-index-result" class="settings-result hidden"></div>
+            <p id="re-index-asof" class="card-hint"></p>
+            <p id="re-index-attribution" class="card-hint"></p>
+          </section>
+
+          <section class="card import-section">
+            <h2 data-i18n="manage.estateList">登録済みの不動産</h2>
+            <div class="table-wrap">
+              <table id="estate-list-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="th.security">銘柄</th>
+                    <th data-i18n="th.account">口座</th>
+                    <th class="num" data-i18n="th.quantity">数量</th>
+                    <th class="num" data-i18n="th.value">評価額</th>
+                    <th data-i18n="th.asOf">基準日</th>
+                    <th class="num" data-i18n="th.actions">操作</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <div id="estate-list-empty" class="empty-state hidden">
+              <p data-i18n="manage.listEmpty">まだ登録がありません。</p>
+            </div>
+          </section>
+        </div>
+
+        <!-- 年金・ポイントタブ -->
+
+        <!-- 暗号資産タブ -->
+        <div id="manage-tab-crypto" class="manage-tab-content hidden">
+          <section class="card import-section" id="cs-status-card">
+            <h2 data-i18n="cs.cardTitle">Crypto-Summary 連携</h2>
+            <div id="cs-status-body" class="cs-status"></div>
+            <p class="card-hint" data-i18n="cs.cardHint">取引の追加・CSV取込・取引所連携は Crypto-Summary 側で行います。残高はこのアプリに自動で合算されます。</p>
+          </section>
+
+          <section class="card import-section">
+            <h2 data-i18n="manage.cryptoTitle">暗号資産の登録</h2>
+            <p class="card-hint" data-i18n="manage.cryptoHint">銘柄名で検索して選ぶと、CoinGeckoの価格に自動連動します（円建て）。Crypto-Summary で管理している分と二重に計上しないようご注意ください。</p>
+            <div class="manual-add-grid">
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.cryptoSearch">銘柄を検索 *</label>
+                <input id="crypto-search" class="settings-input" type="search" data-i18n-placeholder="manage.cryptoSearchPh" placeholder="例: bitcoin / BTC / イーサリアム" />
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.cryptoPick">銘柄</label>
+                <select id="crypto-pick" class="settings-input"></select>
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.account">口座名 *</label>
+                <input id="crypto-account" class="settings-input" type="text" list="crypto-account-list" data-i18n-placeholder="manage.cryptoAccountPh" placeholder="例: GMOコイン / 自宅ウォレット" />
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.cryptoQty">保有数量 *</label>
+                <input id="crypto-qty" class="settings-input" type="number" step="any" />
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.cryptoCost">平均取得単価（円）</label>
+                <input id="crypto-cost" class="settings-input" type="number" step="any" />
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="th.asOf">基準日</label>
+                <input id="crypto-as-of" class="settings-input" type="date" />
+              </div>
+            </div>
+            <div class="settings-actions">
+              <button id="crypto-save" class="settings-save-btn" data-i18n="btn.add">追加</button>
+            </div>
+            <div id="crypto-result" class="settings-result hidden"></div>
+          </section>
+
+          <section class="card import-section">
+            <h2 data-i18n="manage.cryptoList">登録済みの暗号資産</h2>
+            <div class="table-wrap">
+              <table id="crypto-list-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="th.security">銘柄</th>
+                    <th data-i18n="th.account">口座</th>
+                    <th class="num" data-i18n="th.quantity">数量</th>
+                    <th class="num" data-i18n="th.value">評価額</th>
+                    <th data-i18n="th.asOf">基準日</th>
+                    <th class="num" data-i18n="th.actions">操作</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <div id="crypto-list-empty" class="empty-state hidden">
+              <p data-i18n="manage.listEmpty">まだ登録がありません。</p>
+            </div>
+          </section>
+        </div>
+        <div id="manage-tab-pension" class="manage-tab-content hidden">
+          <section class="card import-section">
+            <h2 data-i18n="manage.pensionTitle">年金・ポイントの登録</h2>
+            <p class="card-hint" data-i18n="manage.pensionHint">年金は評価額と取得価額（拠出総額）を、ポイントは残高を登録します（1pt=1円換算）。総資産に含めるかは設定で切り替えられます。</p>
+            <div class="manual-add-grid">
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.ppKind">種類</label>
+                <select id="pp-kind" class="settings-input">
+                  <option value="pension" data-i18n="manage.ppPension">年金</option>
+                  <option value="point" data-i18n="manage.ppPoint">ポイント</option>
+                </select>
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.ppName">名称 *</label>
+                <input id="pp-name" class="settings-input" type="text" data-i18n-placeholder="manage.ppNamePh" placeholder="例: 企業型DC / 楽天ポイント" />
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.account">口座名 *</label>
+                <input id="pp-account" class="settings-input" type="text" list="account-name-list" value="年金" />
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" id="pp-value-label" data-i18n="manage.ppValue">評価額（円） *</label>
+                <input id="pp-value" class="settings-input" type="number" step="any" />
+              </div>
+              <div class="settings-row" id="pp-cost-row">
+                <label class="settings-label" data-i18n="manage.ppCost">取得価額（拠出総額・円）</label>
+                <input id="pp-cost" class="settings-input" type="number" step="any" />
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="th.asOf">基準日</label>
+                <input id="pp-as-of" class="settings-input" type="date" />
+              </div>
+            </div>
+            <div class="settings-actions">
+              <button id="pp-save" class="settings-save-btn" data-i18n="btn.add">追加</button>
+            </div>
+            <div id="pp-result" class="settings-result hidden"></div>
+          </section>
+
+          <section class="card import-section">
+            <h2 data-i18n="manage.pensionList">登録済みの年金・ポイント</h2>
+            <div class="table-wrap">
+              <table id="pension-list-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="th.security">銘柄</th>
+                    <th data-i18n="th.account">口座</th>
+                    <th class="num" data-i18n="th.quantity">数量</th>
+                    <th class="num" data-i18n="th.value">評価額</th>
+                    <th data-i18n="th.asOf">基準日</th>
+                    <th class="num" data-i18n="th.actions">操作</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <div id="pension-list-empty" class="empty-state hidden">
+              <p data-i18n="manage.listEmpty">まだ登録がありません。</p>
+            </div>
+          </section>
+        </div>
+
+        <datalist id="account-name-list"></datalist>
+  <datalist id="cash-account-list"></datalist>
+  <datalist id="metal-account-list"></datalist>
+  <datalist id="crypto-account-list"></datalist>
+      </div>
+
+      <!-- 設定ページ -->
+      <div id="page-settings" class="page hidden">
+        <h1 class="page-title" data-i18n="nav.settings">設定</h1>
+
+        <section class="card import-section">
+          <h2 data-i18n="settings.displayTitle">表示設定</h2>
+          <div class="settings-row">
+            <label class="settings-label" data-i18n="settings.includeClasses">総資産に含める資産クラス</label>
+          </div>
+          <p class="card-hint" data-i18n="settings.includeClassesHint">チェックを外した資産クラスは総資産・構成比・推移グラフから除外されます（データは保持されます）。</p>
+          <div class="table-wrap">
+            <table id="settings-class-table">
+              <thead>
+                <tr>
+                  <th data-i18n="th.assetClass">資産クラス</th>
+                  <th class="num" data-i18n="settings.colInclude">総資産に含める</th>
+                  <th class="num" data-i18n="settings.colOnDashboard">ダッシュボードに表示</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <p class="card-hint" data-i18n="settings.chipHint">「ダッシュボードに表示」にチェックした資産クラスが、ダッシュボード上部で切り替えられるようになります。何も選ばない場合は、保有がある資産クラスが自動で表示されます。</p>
+          <div class="settings-row">
+            <label class="settings-label" for="set-merge-cash" data-i18n="settings.mergeCash">保有一覧で預金・現金を1行にまとめる</label>
+            <input type="checkbox" id="set-merge-cash" />
+          </div>
+          <p class="card-hint" data-i18n="settings.mergeCashHint">オンにすると保有一覧の預金・現金が「A銀行 他N件」の1行に合算されます。銀行ごとの内訳は行のツールチップ・銘柄詳細・クラス別/口座別ページで確認できます。</p>
+          <div class="settings-row">
+            <label class="settings-label" data-i18n="settings.defaultCurrency">既定通貨</label>
+            <select id="set-default-currency" class="settings-input" style="max-width:160px">
+              <option value="JPY">JPY</option>
+              <option value="USD">USD</option>
+              <option value="EUR">EUR</option>
+              <option value="GBP">GBP</option>
+            </select>
+          </div>
+          <div id="settings-save-result" class="settings-result hidden"></div>
+        </section>
+
+        <section class="card import-section">
+          <h2 data-i18n="settings.linkTitle">価格ソース連携（未設定の銘柄）</h2>
+          <p class="card-hint" data-i18n="settings.linkHint">投資信託協会のデータベースから銘柄を検索して紐づけると、基準価額の履歴とチャートが利用できます。年金（iDeCo・企業型DC）の投信も連携でき、評価額から口数を逆算して日々の基準価額で自動評価されるようになります。</p>
+          <p class="card-hint" id="settings-re-index-attribution"></p>
+
+          <!-- 投信 自動連携（一括判定） -->
+          <div class="autolink-head">
+            <button id="autolink-suggest-btn" class="settings-save-btn hidden" data-i18n="settings.autolink.suggestBtn">未連携の投信を自動判定</button>
+            <span id="autolink-progress" class="settings-hint hidden" data-i18n="settings.autolink.progress">投信協会に照会しています…（銘柄数により数分かかります）</span>
+          </div>
+          <div id="autolink-suggest-result" class="settings-result hidden"></div>
+          <div id="autolink-results" class="autolink-results hidden">
+            <div id="autolink-summary" class="section-chips"></div>
+            <div class="table-wrap">
+              <table id="autolink-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="settings.autolink.thApply">連携</th>
+                    <th data-i18n="th.security">銘柄</th>
+                    <th data-i18n="settings.autolink.thVerdict">判定</th>
+                    <th data-i18n="settings.autolink.thCandidate">連携先候補</th>
+                    <th data-i18n="settings.autolink.thNavCheck">基準価額照合</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <div class="settings-actions">
+              <button id="autolink-apply-btn" class="settings-save-btn" data-i18n="settings.autolink.applyBtn">選択した連携を適用</button>
+            </div>
+          </div>
+          <div id="autolink-apply-result" class="settings-result hidden"></div>
+          <div id="autolink-warnings" class="warnings hidden"></div>
+
+          <div id="unlinked-list"></div>
+          <p id="unlinked-empty" class="settings-hint hidden" data-i18n="settings.linkEmpty">価格ソース未設定の銘柄はありません。</p>
+          <button id="linked-toggle" class="link-btn hidden" data-i18n="settings.showLinked">連携済みの銘柄を表示（連携先の変更・解除）</button>
+          <div id="linked-list" class="hidden"></div>
+        </section>
+
+        <section class="card import-section">
+          <h2 data-i18n="settings.dataTitle">データ</h2>
+          <div class="settings-actions">
+            <button id="refresh-prices-btn" class="action-btn" data-i18n="settings.refreshPrices">⟳ 価格キャッシュを更新</button>
+          </div>
+          <div id="refresh-prices-result" class="settings-result hidden"></div>
+        </section>
+
+        <section class="card import-section" id="settings-cs-card">
+          <h2 data-i18n="cs.cardTitle">Crypto-Summary 連携</h2>
+          <div id="settings-cs-status" class="settings-hint"></div>
+          <p class="card-hint" data-i18n="cs.envHint">接続先はサーバーの環境変数（CS_BASE_URL / CS_PUBLIC_URL など）で設定します。この画面からは変更できません。</p>
+        </section>
+      </div>
+
+    </main>
+  </div>
+
+  <!-- ログイン画面（認証有効時のみ表示） -->
+  <div id="login-screen" class="dialog-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="login-title">
+    <div class="dialog">
+      <h3 id="login-title" class="dialog-title"><span class="logo">▦</span> Asset Summary</h3>
+      <p class="dialog-msg" data-i18n="auth.loginMsg">続行するには Google アカウントでログインしてください。</p>
+      <p id="login-denied" class="dialog-msg warnings hidden" data-i18n="auth.denied">このアカウントにはアクセス権限がありません。</p>
+      <div class="dialog-actions">
+        <a class="settings-save-btn login-btn" href="auth/login" data-i18n="auth.loginBtn">Googleでログイン</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- 削除確認ダイアログ -->
+  <div id="delete-dialog" class="dialog-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="delete-dialog-title">
+    <div class="dialog">
+      <h3 id="delete-dialog-title" class="dialog-title">削除しますか？</h3>
+      <p id="delete-dialog-msg" class="dialog-msg"></p>
+      <div class="dialog-actions">
+        <button id="delete-confirm" class="settings-save-btn" style="background:#f85149" data-i18n="btn.delete">削除</button>
+        <button id="delete-cancel" class="link-btn" data-i18n="btn.cancel">キャンセル</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 銘柄統合（名寄せ）ダイアログ -->
+  <div id="merge-dialog" class="dialog-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="merge-dialog-title">
+    <div class="dialog">
+      <h3 id="merge-dialog-title" class="dialog-title" data-i18n="manage.mergeTitle">銘柄を統合（名寄せ）</h3>
+      <p id="merge-dialog-msg" class="dialog-msg"></p>
+      <div class="settings-row">
+        <label class="settings-label" for="merge-target" data-i18n="manage.mergeInto">統合先</label>
+        <select id="merge-target" class="settings-input"></select>
+      </div>
+      <p class="dialog-msg" data-i18n="manage.mergeHint">保有・取引履歴・タグは統合先へ移り、この銘柄名は統合先の別名として記憶されます（次回の取込から自動で統合先に紐づきます）。この操作は取り消せません。</p>
+      <div class="dialog-actions">
+        <button id="merge-confirm" class="settings-save-btn" data-i18n="manage.mergeConfirm">統合する</button>
+        <button id="merge-cancel" class="link-btn" data-i18n="btn.cancel">キャンセル</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="static/i18n.js"></script>
+  <script src="static/app.js"></script>
+</body>
+</html>

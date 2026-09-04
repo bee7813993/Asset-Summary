@@ -1,0 +1,10 @@
+# 統合スタックの TLS 終端。ホスト名は compose の environment から渡される。
+# それぞれのサブドメインを対応するアプリコンテナへ振り分ける。
+
+{$AS_HOST} {
+	reverse_proxy asset-summary:8010
+}
+
+{$CS_HOST} {
+	reverse_proxy crypto-summary:8000
+}

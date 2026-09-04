@@ -1,0 +1,2 @@
+# mf_pdf_autosave 専用の依存（Asset Summary 本体には追加しない）
+playwright>=1.45
