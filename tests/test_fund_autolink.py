@@ -558,7 +558,7 @@ def test_search_distinguishes_unreachable_from_empty(monkeypatch):
 
 def test_import_autolinks_new_fund_and_merges_into_existing(store: Store, monkeypatch):
     """取込で表記揺れの新銘柄ができても、ISIN まで辿って既存銘柄へ統合する。"""
-    from asset_summary.web import app as web_app
+    from asset_summary.importers import autolink as al
 
     # 既存: 連携済みの正しい銘柄
     acct = store.get_or_create_account("架空証券", kind="broker", origin="mf")
@@ -578,10 +578,10 @@ def test_import_autolinks_new_fund_and_merges_into_existing(store: Store, monkey
                 "company": "架空投信"}]))
     monkeypatch.setattr(ts, "fetch_history", lambda r, warn=None: HistoryResult(
         prices={date(2026, 9, 2): D("12345")}))
-    monkeypatch.setattr(web_app, "ensure_price_history", lambda *a, **k: None)
+    monkeypatch.setattr(al, "ensure_price_history", lambda *a, **k: None)
 
     warnings: list[str] = []
-    out = web_app._autolink_new_funds(store, [dup], warnings)
+    out = al.autolink_new_funds(store, [dup], warnings)
 
     assert out["attempted"] == 1
     assert [x["security_id"] for x in out["linked"]] == [dup]
@@ -593,7 +593,7 @@ def test_import_autolinks_new_fund_and_merges_into_existing(store: Store, monkey
 
 def test_import_autolink_records_reason_when_it_cannot_link(store: Store, monkeypatch):
     """連携できなかったときは理由を添えて返す（協会へ届かないケース）。"""
-    from asset_summary.web import app as web_app
+    from asset_summary.importers import autolink as al
 
     dup = _unlinked_fund(store, "架空未知ファンド", reported=D("12345"))
     monkeypatch.setattr(ts, "search_funds",
@@ -602,7 +602,7 @@ def test_import_autolink_records_reason_when_it_cannot_link(store: Store, monkey
                         lambda r, warn=None: HistoryResult(reachable=False))
 
     warnings: list[str] = []
-    out = web_app._autolink_new_funds(store, [dup], warnings)
+    out = al.autolink_new_funds(store, [dup], warnings)
     assert out["linked"] == []
     assert out["unresolved"] == [
         {"security_id": dup, "name": "架空未知ファンド",
@@ -613,14 +613,44 @@ def test_import_autolink_records_reason_when_it_cannot_link(store: Store, monkey
 
 def test_import_autolink_skips_when_too_many_new_funds(store: Store, monkeypatch):
     """新規が多いときは取込を待たせない（設定ページへ誘導）。"""
-    from asset_summary.web import app as web_app
+    from asset_summary.importers import autolink as al
 
     ids = [_unlinked_fund(store, f"架空ファンド{i}") for i in range(6)]
     called = []
     monkeypatch.setattr(ts, "search_funds",
                         lambda q, warn=None: called.append(q) or ts.SearchResult())
     warnings: list[str] = []
-    out = web_app._autolink_new_funds(store, ids, warnings)
+    out = al.autolink_new_funds(store, ids, warnings)
     assert out["skipped"] is True and out["linked"] == []
     assert called == []                              # 協会へ照会しない
     assert any("設定ページ" in w for w in warnings)
+
+
+def test_inbox_commit_runs_autolink_and_reports_it(monkeypatch, tmp_path):
+    """受信フォルダの自動取込でも、確定後に自動連携が走り結果がイベントに残る。"""
+    from asset_summary.importers import inbox
+
+    monkeypatch.setattr(inbox, "build_preview", lambda store, data, fn: {
+        "batch_id": "b-1", "suggested_as_of": "2026-09-07",
+        "sections": [{"section": "fund", "default_include": True}],
+        "report": {"grand_total_ok": True, "sections": []}, "diff": [],
+    })
+    monkeypatch.setattr(inbox, "commit_batch", lambda store, bid, **kw: {
+        "created": 1, "updated": 0, "zeroed": 0, "new_security_ids": [7]})
+    seen = {}
+
+    def fake_autolink(store, ids, warnings):
+        seen["ids"] = ids
+        return {"attempted": 1, "linked": [], "unresolved": [
+            {"security_id": 7, "name": "架空ファンド", "status": "unavailable",
+             "reason": "search_unreachable"}]}
+
+    monkeypatch.setattr(inbox, "autolink_new_funds", fake_autolink)
+
+    pdf = tmp_path / "x.pdf"
+    pdf.write_bytes(b"%PDF")
+    ev = inbox.process_pdf(object(), b"%PDF", pdf)
+    assert ev["status"] == "committed"
+    assert seen["ids"] == [7]                                   # 新規銘柄だけを照会
+    assert ev["autolink"]["unresolved"][0]["reason"] == "search_unreachable"
+    assert "投信協会へ照会できませんでした" in ev["detail"]      # 理由が文章で残る

@@ -16,11 +16,12 @@ build_matches は result.report.warnings へプレビュー用の警告を追記
 
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal
 from typing import Any
 
 from ..core import fund_autolink
-from ..core.models import PriceSourceType
+from ..core.models import AssetClass, PriceSourceType
 from ..core.store import Store
 from .base import ParsedHolding, ParseResult, SectionType, make_name_key, normalize_code
 from .mf_pdf import SECTION_LABELS
@@ -315,10 +316,59 @@ def _make_key(account: str, identity: str, lot_seq: int) -> str:
     return f"acct:{account}|sec:{identity}|lot:{lot_seq}"
 
 
+# 基準価額で裏取りする前方一致に要る最小の共通長。これより短い共通部分は偶然。
+NAV_PREFIX_MIN_LEN = 8
+
+
+def _resolve_fund_by_nav(
+    store: Store, target: dict[str, Any], as_of: date | None
+) -> tuple[int | None, str | None]:
+    """名前の末尾が欠けた／余った投信を、基準価額の一致で既存銘柄へ寄せる。
+
+    投信は PDF に銘柄コードが無く名前しか手がかりが無いが、改ページ位置では
+    名前の続きがフッタと重なって末尾が欠けたり（「…(為替ヘッジな」）、逆に
+    フッタの断片が末尾に付いたり（「…プラスoneyforward.com/bs/portfolio」）する。
+    どちらも既存の名前と前方一致の関係になる。
+
+    名前だけで寄せると、一方が他方の前方部分になっている別銘柄どうしを混ぜるので、PDF 記載の基準価額が既存銘柄のローカル日次系列と円単位で一致する
+    ことを条件にする（fund_autolink と同じ「一致は事実上の同一性証明」）。
+    ネットワークは使わない。一致が1件のときだけ寄せ、複数なら判断しない。
+
+    返値: (security_id, 寄せ先の名前)。寄せなければ (None, None)。
+    """
+    reported = _d(target.get("reported_price"))
+    key = target["name_key"]
+    if reported is None or len(key) < NAV_PREFIX_MIN_LEN:
+        return None, None
+    day = as_of or date.today()
+    hits: list[tuple[int, str]] = []
+    for sec in store.list_securities():
+        if sec.asset_class not in (AssetClass.FUND_JP, AssetClass.FUND_FOREIGN):
+            continue
+        if sec.price_source_type != PriceSourceType.TOUSHIN or not sec.price_source_ref:
+            continue
+        k = sec.name_key
+        if k == key or not (k.startswith(key) or key.startswith(k)):
+            continue
+        if min(len(k), len(key)) < NAV_PREFIX_MIN_LEN:
+            continue
+        series, _ccy = store.get_price_rows("toushin", sec.price_source_ref)
+        prices = {date.fromisoformat(d): p for d, p in series.items()}
+        matched, _day, _nav = fund_autolink.verify_nav(prices, reported, day)
+        if matched:
+            hits.append((sec.id, sec.name))
+    if len(hits) == 1:
+        return hits[0]
+    return None, None
+
+
 def build_matches(
-    store: Store, result: ParseResult
+    store: Store, result: ParseResult, as_of: date | None = None
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    """返値: (rows, diff, sections)。すべてJSON直列化可能。"""
+    """返値: (rows, diff, sections)。すべてJSON直列化可能。
+
+    as_of は基準価額照合の基準日（PDF の日付）。無ければ今日。
+    """
     known_codes = {s.code for s in store.list_securities() if s.code}
     accounts_by_name = {a.name: a for a in store.list_accounts()}
 
@@ -337,6 +387,7 @@ def build_matches(
         groups.setdefault((target["account"], _identity(target)), []).append(target)
 
     matched_old: set[tuple[int, int, int]] = set()
+    nav_notes: set[tuple[str, str]] = set()
 
     for (account_name, identity), group in groups.items():
         first = group[0]
@@ -344,6 +395,10 @@ def build_matches(
         security_id = store.resolve_security(
             code=first["code"], name_key=first["name_key"]
         )
+        if security_id is None and first["section"] == SectionType.FUND.value:
+            security_id, via = _resolve_fund_by_nav(store, first, as_of)
+            if security_id is not None:
+                nav_notes.add((first["name"], via))
         old_lots = (
             store.latest_lots(acct.id, security_id)
             if acct is not None and security_id is not None
@@ -388,6 +443,10 @@ def build_matches(
     rows.extend(targets)  # 解析順を保持（targetsはholdings順）
 
     rows.extend(_missing_rows(store, matched_old))
+    for name, via in sorted(nav_notes):
+        result.report.warnings.append(
+            f"「{name}」は基準価額が一致したため、既存の「{via}」として取り込みます"
+        )
     result.report.warnings.extend(_consistency_warnings(rows))
 
     diff = [{k: row.get(k) for k in _DIFF_FIELDS} for row in rows]

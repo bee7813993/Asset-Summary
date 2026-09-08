@@ -151,6 +151,18 @@ _FOOTER_MARKERS = (
 # - ヘルプ・サポート: ページ番号が語の中に挟まる（例 'ヘルプ・サポー1/8ト'）
 # - フッタのURL: 左端＝名称列に落ちる
 _PAGE_CHROME_WORD_RE = re.compile(r"^ヘルプ[・･]?サポー.*ト$|^https?://")
+# フッタのURL本文。改ページで銘柄名の続きがこの行に重なると、pdfplumber がURLを
+# 重なった位置で2語に割る（'https://m' + 'oneyforward.com/bs/portfolio'）。後ろ半分は
+# https:// で始まらないので、URLの部分文字列（ASCII 4文字以上）も装飾として落とす。
+# 和文の銘柄名はASCIIでないので当たらず、英数字の銘柄語（ETF/REIT/DC など）は
+# このURLの部分文字列にならない。
+_FOOTER_URL = "https://moneyforward.com/bs/portfolio"
+
+
+def _is_page_chrome(norm: str) -> bool:
+    if _PAGE_CHROME_WORD_RE.search(norm):
+        return True
+    return len(norm) >= 4 and norm.isascii() and norm in _FOOTER_URL
 # ページ冒頭の日時見出し（例 '2026/08/24 16:37 マネーフォワード ME'）は行単位で無視する
 _PAGE_HEADER_RE = re.compile(
     r"^\d{4}/\d{1,2}/\d{1,2}\s+\d{1,2}:\d{2}\s+マネーフォワード\s*ME$"
@@ -622,7 +634,7 @@ def _filter_words(words: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not text:
             continue
         norm = nfkc(text)
-        if _PAGE_CHROME_WORD_RE.search(norm):
+        if _is_page_chrome(norm):
             continue
         if _is_doubled_label(norm):
             continue

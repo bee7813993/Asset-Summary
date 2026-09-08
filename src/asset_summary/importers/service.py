@@ -62,7 +62,7 @@ def build_preview(store: Store, pdf_bytes: bytes, filename: str) -> dict[str, An
         )
 
     result, suggested = mf_pdf.parse_pdf(pdf_bytes)
-    rows, diff, sections = matching.build_matches(store, result)
+    rows, diff, sections = matching.build_matches(store, result, as_of=suggested)
     report = result.report.model_dump(mode="json")
     suggested_iso = suggested.isoformat() if suggested else None
 
