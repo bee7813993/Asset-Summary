@@ -80,6 +80,11 @@ from ..core.prices import (
 from ..core.store import ConflictError, Store, StoreError
 from ..importers.base import make_name_key, normalize_code
 from ..importers.inbox import InboxWatcher
+from ..importers.autolink import (
+    autolink_lock,
+    autolink_new_funds as _autolink_new_funds,
+    dedupe_linked_funds as _dedupe_linked_funds,
+)
 from ..importers.service import DuplicateImportError, build_preview, commit_batch
 from ..importers.tx_service import (
     build_tx_preview,
@@ -294,114 +299,6 @@ def _resolve_currency(raw: str | None, settings: dict[str, str]) -> str:
     """currency クエリの解決。未指定は設定の既定通貨、未対応は JPY へフォールバック。"""
     c = (raw or settings.get("default_currency") or "JPY").upper()
     return c if c in SUPPORTED_CURRENCIES else "JPY"
-
-
-# 投信協会への照会を直列化するロック。設定ページからの一括判定と、取込直後の
-# 自動連携が同時に走らないようにする（相手は外部サービスなのでプロセス共有でよい）。
-autolink_lock = threading.Lock()
-
-# 取込直後に自動連携を試みる新規投信の上限。1件あたり検索1〜3回＋CSV最大3回の
-# 照会が要るため、これを超えるときは取込を待たせず設定ページへ誘導する。
-AUTOLINK_ON_IMPORT_MAX = 5
-
-
-def _dedupe_linked_funds(store: Store, warnings: list[str]) -> list[dict[str, Any]]:
-    """同じ投信協会ファンドに連携された重複銘柄を自動統合する。
-
-    ref（ISIN:協会コード）が同じなら同一ファンドなので確認は要らない。
-    取引が移動したら原価を作り直す（holding_cost_basis は派生値なので冪等）。
-    """
-    merged = fund_autolink.dedupe_same_fund(store, warn=warnings.append)
-    if any(m["transactions"] for m in merged):
-        try:
-            warnings.extend(recompute_cost_basis(store).get("warnings", []))
-        except Exception as e:  # noqa: BLE001 — 統合自体は完了している
-            warnings.append(f"取得原価の再計算に失敗しました: {e}")
-    return merged
-
-
-def _autolink_new_funds(
-    store: Store, security_ids: list[int], warnings: list[str]
-) -> dict[str, Any]:
-    """取込で新しくできた投信を、その場で投信協会へ照会して連携する。
-
-    投信は MF の PDF に銘柄コードが無く名前しか手がかりが無いので、表記が
-    揺れると別銘柄として登録されてしまう。ISIN:協会コードまで辿れば同一性は
-    確定するため、新規銘柄が出たときだけ照会し、基準価額が一致した候補へ
-    自動連携する。連携できれば dedupe_same_fund が既存銘柄へ統合する。
-
-    対象は「この取込で新しくできた銘柄」だけに絞る。全未連携を見ると照会に
-    数分かかり、取込がその間止まってしまう。件数が多いときも見送り、設定
-    ページからまとめて実行してもらう。
-
-    連携できなかったものは reason を添えて返す（協会へ届かなかったのか、
-    該当が無かったのかを利用者が区別できるようにする）。
-    """
-    targets = [
-        s.id
-        for s in (store.get_security(i) for i in security_ids)
-        if s is not None
-        and s.price_source_status == PriceSourceStatus.UNLINKED
-        and s.asset_class in (AssetClass.FUND_JP, AssetClass.FUND_FOREIGN)
-    ]
-    out: dict[str, Any] = {"attempted": len(targets), "linked": [], "unresolved": []}
-    if not targets:
-        return out
-    if len(targets) > AUTOLINK_ON_IMPORT_MAX:
-        out["skipped"] = True
-        warnings.append(
-            f"新しい投信が {len(targets)} 件あります。"
-            "取込を待たせないため自動連携は行いませんでした（設定ページから実行できます）"
-        )
-        return out
-    if not autolink_lock.acquire(blocking=False):
-        out["skipped"] = True
-        warnings.append("投信の自動判定が実行中のため、今回の自動連携は見送りました")
-        return out
-    try:
-        suggestions = fund_autolink.suggest_links(
-            store, warn=warnings.append, security_ids=targets
-        )
-    except Exception as e:  # noqa: BLE001 — 取込自体は成功させる
-        warnings.append(f"投信の自動連携に失敗しました: {e}")
-        return out
-    finally:
-        autolink_lock.release()
-
-    applied: list[Security] = []
-    for s in suggestions:
-        if s["status"] == "auto" and s["best_ref"]:
-            store.update_security(
-                s["security_id"],
-                price_source_type=PriceSourceType.TOUSHIN.value,
-                price_source_ref=s["best_ref"],
-                price_source_status=PriceSourceStatus.LINKED.value,
-            )
-            sec = store.get_security(s["security_id"])
-            if sec is not None:
-                applied.append(sec)
-            out["linked"].append({"security_id": s["security_id"], "name": s["name"],
-                                  "ref": s["best_ref"]})
-        else:
-            out["unresolved"].append(
-                {
-                    "security_id": s["security_id"],
-                    "name": s["name"],
-                    "status": s["status"],
-                    "reason": s.get("reason"),
-                }
-            )
-    if applied:
-        # ref が同じ既存銘柄があればここで統合される（別名の重複が消える）
-        out["merged"] = _dedupe_linked_funds(store, warnings)
-        try:
-            today = date.today()
-            ensure_price_history(
-                store, applied, today - timedelta(days=365 * 5), today, warnings.append
-            )
-        except Exception as e:  # noqa: BLE001
-            warnings.append(f"価格履歴の取得に失敗しました: {e}")
-    return out
 
 
 def _derive_pension_units_now(

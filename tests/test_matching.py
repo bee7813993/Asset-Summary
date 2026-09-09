@@ -11,6 +11,8 @@ from asset_summary.core.models import (
     Unit,
 )
 from asset_summary.core.store import Store
+from asset_summary.core import price_store as ps
+from asset_summary.core.models import PriceSourceType
 from asset_summary.importers.base import make_name_key
 from asset_summary.importers.matching import CASH_SECURITY_NAME, build_matches
 from tests.fixtures.factories import (
@@ -207,6 +209,59 @@ def test_truncated_name_with_several_candidates_is_not_guessed(store: Store):
                                asset_class=AssetClass.FUND_JP))
     cut = make_name_key("架空ファンド(為替ヘッジなし)(")
     assert store.resolve_security(name_key=cut) is None
+
+
+# ----------------------------------------------------------------------
+# 名前の末尾が欠けた／余った投信を基準価額で既存銘柄へ寄せる
+# ----------------------------------------------------------------------
+
+
+def _linked_fund(store: Store, name: str, ref: str, navs: dict) -> int:
+    sid = store.create_security(_sec(
+        name, code=None, asset_class=AssetClass.FUND_JP, unit=Unit.KUCHI,
+        price_unit_divisor=10000, price_source_type=PriceSourceType.TOUSHIN,
+        price_source_ref=ref, price_source_status=PriceSourceStatus.LINKED))
+    ps.save_daily_prices(store, "toushin", ref, navs, "JPY")
+    return sid
+
+
+def test_fund_with_footer_garbage_resolves_by_nav(store: Store):
+    """既存名の後ろにフッタの断片が付いても、基準価額が一致すれば同一銘柄。"""
+    sid = _linked_fund(store, "架空グロース株式ゴールドプラス", "JP1:1",
+                       {date(2026, 9, 7): Decimal("12345")})
+    result = make_result(fund("架空グロース株式ゴールドプラスoneyforward.com/bs/portfolio",
+                              "10000", "10000", "12345", "12345"))
+    rows, _, _ = build_matches(store, result, as_of=date(2026, 9, 7))
+    assert rows[0]["security_id"] == sid            # 旧実装では None → 別銘柄
+    assert any("基準価額が一致" in w for w in result.report.warnings)
+
+
+def test_truncated_fund_resolves_by_nav_without_bracket_hint(store: Store):
+    """括弧が無い名前の欠けも、基準価額の一致で寄せられる。"""
+    sid = _linked_fund(store, "架空グローバル債券インデックス", "JP1:2",
+                       {date(2026, 9, 6): Decimal("10500")})
+    result = make_result(fund("架空グローバル債券インデ", "100", "10000", "10500", "105"))
+    rows, _, _ = build_matches(store, result, as_of=date(2026, 9, 7))
+    assert rows[0]["security_id"] == sid
+
+
+def test_nav_mismatch_does_not_merge_prefix_names(store: Store):
+    """前方一致でも基準価額が違えば別銘柄のまま（ヘッジ有無の亜種など）。"""
+    _linked_fund(store, "架空グローバル株式(為替ヘッジあり)", "JP1:3",
+                 {date(2026, 9, 7): Decimal("20000")})
+    result = make_result(fund("架空グローバル株式(為替ヘッジあり)(SBI)", "100", "10000",
+                              "21000", "210"))
+    rows, _, _ = build_matches(store, result, as_of=date(2026, 9, 7))
+    assert rows[0]["security_id"] is None
+
+
+def test_nav_match_with_two_candidates_is_not_guessed(store: Store):
+    _linked_fund(store, "架空インデックス", "JP1:4", {date(2026, 9, 7): Decimal("12345")})
+    _linked_fund(store, "架空インデックスファンド", "JP1:5",
+                 {date(2026, 9, 7): Decimal("12345")})
+    result = make_result(fund("架空インデックスファ", "100", "10000", "12345", "123"))
+    rows, _, _ = build_matches(store, result, as_of=date(2026, 9, 7))
+    assert rows[0]["security_id"] is None
 
 
 # ----------------------------------------------------------------------

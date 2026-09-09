@@ -245,6 +245,34 @@ def _page_chrome_doc():
     return [words]
 
 
+def test_split_footer_url_fragment_is_dropped():
+    """改ページで名前の続きがフッタに重なり、URLが2語に割れたケース。
+
+    実PDFの実測: 名前の末尾 'ス' が x=53.75-60.25 に来たため URL が x=57.01 で
+    'https://m' と 'oneyforward.com/bs/portfolio' に分かれ、後ろ半分が名称列へ
+    結合されて「<銘柄名>oneyforward.com/bs/portfolio」になった。
+    """
+    words = []
+    words += heading("投資信託", 30)
+    words += total_line("16,000", 40)
+    words += fund_header(50)
+    words += [
+        w("架空グロース", 19, 60, 780),
+        w("10,000", 95, 121, 780), w("15,000", 145, 170, 780), w("16,000", 181, 206, 780),
+        w("16,000円", 226, 260, 780), w("0円", 277, 289, 780),
+        w("1,000円", 306, 335, 780), w("6.67%", 354, 378, 780),
+        w("楽天証券", 386, 416, 780),
+    ]
+    words += [w("株式・ゴール", 19, 78, 789)]
+    words += [w("ドプラ", 19, 50, 798)]
+    words += [w("ス", 19, 26, 807)]
+    words += [w("https://m", 19, 45, 811), w("oneyforward.com/bs/portfolio", 45, 100, 811)]
+    result = parse_words([words])
+    assert len(result.holdings) == 1
+    assert result.holdings[0].name_raw == "架空グロース株式・ゴールドプラス"
+    assert not result.report.unparsed_lines
+
+
 def test_page_chrome_does_not_leak_into_names():
     result = parse_words(_page_chrome_doc())
     assert len(result.holdings) == 1

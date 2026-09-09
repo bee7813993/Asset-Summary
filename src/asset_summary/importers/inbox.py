@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core.store import Store
+from .autolink import autolink_new_funds, describe as describe_autolink
 from .service import DuplicateImportError, build_preview, commit_batch
 
 log = logging.getLogger("asset_summary.inbox")
@@ -129,6 +130,7 @@ def _event(
     updated: int = 0,
     zeroed: int = 0,
     excluded: int = 0,
+    autolink: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "at": _now_iso(),
@@ -140,6 +142,7 @@ def _event(
         "updated": updated,
         "zeroed": zeroed,
         "excluded": excluded,
+        "autolink": autolink,
     }
 
 
@@ -184,18 +187,28 @@ def process_pdf(store: Store, data: bytes, path: Path) -> dict[str, Any]:
         store.delete_batch(preview["batch_id"])
         return _event("error", filename, detail=f"取込を確定できませんでした: {e}")
 
-    detail = ""
+    # Web の確定と同じく、新しくできた投信はその場で投信協会へ照会して連携する。
+    # ここを通らないと、毎日の自動取込では表記揺れの複製が残り続ける。
+    warnings: list[str] = []
+    autolink = autolink_new_funds(store, result.get("new_security_ids") or [], warnings)
+
+    parts: list[str] = []
     if excluded:
-        detail = f"低信頼マッチのため {excluded} 行を除外しました（必要なら手動取込で確認）"
+        parts.append(f"低信頼マッチのため {excluded} 行を除外しました（必要なら手動取込で確認）")
+    note = describe_autolink(autolink)
+    if note:
+        parts.append(note)
+    parts.extend(warnings)
     return _event(
         "committed",
         filename,
-        detail=detail,
+        detail=" / ".join(parts),
         as_of=as_of_iso,
         created=int(result.get("created", 0)),
         updated=int(result.get("updated", 0)),
         zeroed=int(result.get("zeroed", 0)),
         excluded=excluded,
+        autolink=autolink,
     )
 
 
