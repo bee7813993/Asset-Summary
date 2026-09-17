@@ -167,6 +167,9 @@ def _is_page_chrome(norm: str) -> bool:
 _PAGE_HEADER_RE = re.compile(
     r"^\d{4}/\d{1,2}/\d{1,2}\s+\d{1,2}:\d{2}\s+マネーフォワード\s*ME$"
 )
+# 字間が空いた見出しの空白を全部除くと日付と時刻が連結する（'2026/09/177:45'）。
+# 空白除去後の形はこちらで判定する。
+_PAGE_HEADER_COMPACT_RE = re.compile(r"^\d{4}/\d{1,2}/\d{1,4}:\d{2}マネーフォワードME$")
 
 _TOTAL_RE = re.compile(r"^合計[::]?\s*(.+?)\s*$")
 _GRAND_TOTAL_RE = re.compile(r"^資産総額[::]?\s*(.+?)\s*$")
@@ -501,7 +504,13 @@ class _Parser:
             if any(marker in text for marker in _FOOTER_MARKERS):
                 footer_mode = True
                 continue
-            if "©" in text or _PAGE_HEADER_RE.match(text):
+            # 見出し級の大きな文字は字間が空いて1文字ずつ別の語になることがある
+            # （'投 資 信 託'、'2026/0 9/1 7 7 :45'）。空白を除いた形でも判定する。
+            if (
+                "©" in text
+                or _PAGE_HEADER_RE.match(text)
+                or _PAGE_HEADER_COMPACT_RE.match(text.replace(" ", ""))
+            ):
                 continue
             self._feed_line(page_no, line["top"], line_words, text)
         # 折返し断片はページを跨がない（ヘッダが再掲されるため）
@@ -513,9 +522,15 @@ class _Parser:
     def _feed_line(
         self, page_no: int, top: float, line_words: list[dict[str, Any]], text: str
     ) -> None:
-        # セクション見出し（単語1つの行・完全一致）
-        if len(line_words) == 1 and text in SECTION_HEADINGS:
-            self._enter_section(SECTION_HEADINGS[text])
+        # セクション見出し（完全一致）。大きな文字は字間が空いて '投 資 信 託' のように
+        # 1文字ずつ別の語になることがあるので、語が1つか、全部1文字の語なら
+        # 空白を除いて照合する。
+        compact = text.replace(" ", "")
+        heading_shape = len(line_words) == 1 or all(
+            len(w["text"]) == 1 for w in line_words
+        )
+        if heading_shape and compact in SECTION_HEADINGS:
+            self._enter_section(SECTION_HEADINGS[compact])
             return
 
         if self.section == SectionType.UNKNOWN:

@@ -321,6 +321,33 @@ def test_noise_removed_and_unparsed_lines(parsed):
     assert "運営会社" not in names
 
 
+def test_letter_spaced_section_heading_is_recognized():
+    """見出しが '投 資 信 託' と1文字ずつ別の語で来ても、セクションに入る。
+
+    実PDFで見出しの字間が空き、投信の行が直前の株式セクションに積まれて
+    検算が倍になった。
+    """
+    words = []
+    words += [w("2026/0", 34, 52, 15.5), w("9/1", 52, 61, 15.5), w("7", 61, 66, 15.5),
+              w("7", 66, 69, 15.5), w(":45", 69, 80, 15.5),
+              w("マネーフォワード", 504, 551, 15.7), w("ME", 553, 562, 17.0)]
+    words += [w("投", 50, 58, 30), w("資", 58, 66, 30), w("信", 66, 74, 30), w("託", 74, 82, 30)]
+    words += total_line("16,000", 40)
+    words += fund_header(50)
+    words += [
+        w("架空ファンド", 19, 78, 70),
+        w("10,000", 95, 121, 70), w("15,000", 145, 170, 70), w("16,000", 181, 206, 70),
+        w("16,000円", 226, 260, 70), w("0円", 277, 289, 70),
+        w("1,000円", 306, 335, 70), w("6.67%", 354, 378, 70),
+        w("架空証券", 386, 416, 70),
+    ]
+    result = parse_words([words])
+    assert [s.section for s in result.report.sections] == [SectionType.FUND]
+    assert result.report.sections[0].ok
+    assert not result.report.unparsed_lines      # ページ見出しも捨てられる
+    assert result.holdings[0].name_raw == "架空ファンド"
+
+
 def test_pua_footer_word_dropped():
     pages = [
         heading("預金・現金", 10)
