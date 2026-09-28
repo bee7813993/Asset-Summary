@@ -1407,26 +1407,7 @@ class Store:
             for tx in txs:
                 if not tx.dedup_key:
                     raise StoreError("dedup_key の無い取引は保存できません")
-                cur = conn.execute(
-                    """INSERT INTO transactions
-                       (dedup_key, account_id, security_id, trade_date, settle_date,
-                        tx_type, quantity, unit_price, gross_amount, fee, tax,
-                        net_amount, split_ratio, currency, lot_label, note, origin,
-                        broker_ref, batch_id, raw, created_at)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                       ON CONFLICT(dedup_key) DO NOTHING""",
-                    (
-                        tx.dedup_key, tx.account_id, tx.security_id,
-                        tx.trade_date.isoformat(),
-                        tx.settle_date.isoformat() if tx.settle_date else None,
-                        tx.tx_type.value if hasattr(tx.tx_type, "value") else tx.tx_type,
-                        _d2s(tx.quantity), _d2s(tx.unit_price), _d2s(tx.gross_amount),
-                        _d2s(tx.fee), _d2s(tx.tax), _d2s(tx.net_amount),
-                        _d2s(tx.split_ratio), tx.currency, tx.lot_label, tx.note,
-                        tx.origin, tx.broker_ref, batch_id,
-                        json.dumps(tx.raw, ensure_ascii=False, default=str), now,
-                    ),
-                )
+                cur = self._insert_transaction(conn, tx, batch_id, now)
                 if cur.rowcount:
                     inserted += 1
                 else:
@@ -1438,12 +1419,68 @@ class Store:
                 )
         return (inserted, skipped)
 
+    @staticmethod
+    def _insert_transaction(
+        conn: sqlite3.Connection, tx: Transaction, batch_id: str | None, now: str
+    ) -> sqlite3.Cursor:
+        return conn.execute(
+            """INSERT INTO transactions
+               (dedup_key, account_id, security_id, trade_date, settle_date,
+                tx_type, quantity, unit_price, gross_amount, fee, tax,
+                net_amount, split_ratio, currency, lot_label, note, origin,
+                broker_ref, batch_id, raw, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(dedup_key) DO NOTHING""",
+            (
+                tx.dedup_key, tx.account_id, tx.security_id,
+                tx.trade_date.isoformat(),
+                tx.settle_date.isoformat() if tx.settle_date else None,
+                tx.tx_type.value if hasattr(tx.tx_type, "value") else tx.tx_type,
+                _d2s(tx.quantity), _d2s(tx.unit_price), _d2s(tx.gross_amount),
+                _d2s(tx.fee), _d2s(tx.tax), _d2s(tx.net_amount),
+                _d2s(tx.split_ratio), tx.currency, tx.lot_label, tx.note,
+                tx.origin, tx.broker_ref, batch_id,
+                json.dumps(tx.raw, ensure_ascii=False, default=str), now,
+            ),
+        )
+
+    def add_manual_transaction(self, tx: Transaction) -> int:
+        """手動登録の取引を1件足し、その id を返す。どのバッチにも属さない。
+
+        取込の巻き戻し（delete_batch）はバッチで消すので、手動の取引は
+        巻き戻しでは消えない。消すときは delete_transaction で1件ずつ。
+        """
+        if not tx.dedup_key:
+            raise StoreError("dedup_key の無い取引は保存できません")
+        with self.connect() as conn:
+            cur = self._insert_transaction(conn, tx, None, _utcnow())
+            if not cur.rowcount:
+                raise ConflictError("同じ取引がすでに登録されています")
+            return int(cur.lastrowid)
+
+    def get_transaction(self, tx_id: int) -> Transaction | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM transactions WHERE id = ?", (tx_id,)
+            ).fetchone()
+        return _row_to_transaction(row) if row else None
+
+    def delete_transaction(self, tx_id: int) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """DELETE FROM transaction_batches WHERE dedup_key =
+                   (SELECT dedup_key FROM transactions WHERE id = ?)""",
+                (tx_id,),
+            )
+            conn.execute("DELETE FROM transactions WHERE id = ?", (tx_id,))
+
     def list_transactions(
         self,
         *,
         security_id: int | None = None,
         account_id: int | None = None,
         batch_id: str | None = None,
+        origin: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> list[Transaction]:
@@ -1457,6 +1494,9 @@ class Store:
         if batch_id is not None:
             clauses.append("batch_id = ?")
             params.append(batch_id)
+        if origin is not None:
+            clauses.append("origin = ?")
+            params.append(origin)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         sql = f"SELECT * FROM transactions {where} ORDER BY trade_date, id"
         if limit is not None:
@@ -1467,7 +1507,7 @@ class Store:
 
     def count_transactions(self, **kw: Any) -> int:
         clauses, params = [], []
-        for field in ("security_id", "account_id", "batch_id"):
+        for field in ("security_id", "account_id", "batch_id", "origin"):
             value = kw.get(field)
             if value is not None:
                 clauses.append(f"{field} = ?")
@@ -1502,8 +1542,23 @@ class Store:
     def replace_cost_basis(
         self, rows: list[dict[str, Any]], batch_id: str | None = None
     ) -> int:
+        """取得原価の派生値を rows で置き換える（rows は全口座×銘柄の再計算結果）。
+
+        rows に無い口座×銘柄の行は消す。取引が1件も無くなった口座×銘柄
+        （手動の取引を消した、取込を巻き戻した）の古い取得原価が、損益の
+        上書きとして残り続けないように。
+        """
         now = _utcnow()
+        keep = {(row["account_id"], row["security_id"]) for row in rows}
         with self.connect() as conn:
+            for stale in conn.execute(
+                "SELECT account_id, security_id FROM holding_cost_basis"
+            ).fetchall():
+                if (stale["account_id"], stale["security_id"]) not in keep:
+                    conn.execute(
+                        "DELETE FROM holding_cost_basis WHERE account_id = ? AND security_id = ?",
+                        (stale["account_id"], stale["security_id"]),
+                    )
             for row in rows:
                 conn.execute(
                     """INSERT INTO holding_cost_basis

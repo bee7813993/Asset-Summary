@@ -813,24 +813,50 @@ def quantity_paths(
         txs = txs_by_group.get(key)
         if not txs:
             continue
-        path = _group_quantity_path(snaps, _ordered(txs))
+        path, _status = _group_quantity_path(snaps, _ordered(txs))
         if path is not None:
             out[key] = path
     return out
 
 
+def quantity_path_status(
+    transactions: Sequence[Transaction],
+    snapshots: Sequence[HoldingSnapshot],
+    account_id: int,
+    security_id: int,
+) -> str:
+    """口座×銘柄の取引が推移グラフに使われるか。使われないならその理由。
+
+    traced（使う）/ no_snapshot（その口座にその銘柄の記録が無い）/
+    no_trades / no_earlier_trades（最初の取込より前の取引が無い）/
+    lots_differ / inconsistent。手動登録の直後に、入れた取引がグラフに
+    届いたかを利用者へ返すためのもの（判定は quantity_paths と同じ）。
+    """
+    key = (account_id, security_id)
+    snaps = [s for s in snapshots if (s.account_id, s.security_id) == key]
+    if not snaps:
+        return "no_snapshot"
+    txs = [
+        t for t in transactions
+        if (t.account_id, t.security_id) == key and _quantity_step(t) is not None
+    ]
+    if not txs:
+        return "no_trades"
+    return _group_quantity_path(snaps, _ordered(txs))[1]
+
+
 def _group_quantity_path(
     snaps: list[HoldingSnapshot], txs: list[Transaction]
-) -> QuantityPath | None:
+) -> tuple[QuantityPath | None, str]:
     lots: dict[int, list[HoldingSnapshot]] = {}
     for s in snaps:
         lots.setdefault(s.lot_seq, []).append(s)
     starts = {min(s.as_of_date for s in members) for members in lots.values()}
     if len(starts) != 1:
-        return None
+        return (None, "lots_differ")
     first = starts.pop()
     if not any(t.trade_date < first for t in txs):
-        return None
+        return (None, "no_earlier_trades")
 
     # 錨は「その日に約定の無い」最初のスナップショット日。取込の基準日に約定が
     # あると、それがスナップショットに入っているか（夕方の取込）いないか（朝の
@@ -858,8 +884,8 @@ def _group_quantity_path(
             mult, delta = _quantity_step(t)
             q = (q - delta) / mult
         if q < -QTY_EPSILON:
-            return None
+            return (None, "inconsistent")
         if abs(q) <= QTY_EPSILON:
             q = ZERO
     changes.reverse()
-    return QuantityPath(before=first, changes=tuple(changes), opening=q)
+    return (QuantityPath(before=first, changes=tuple(changes), opening=q), "traced")

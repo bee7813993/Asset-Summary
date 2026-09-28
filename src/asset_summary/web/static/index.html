@@ -1232,6 +1232,7 @@
 
         <div class="import-tabs">
           <button class="import-tab manage-tab active" data-tab="sec" data-i18n="manage.tabSecurities">銘柄・保有</button>
+          <button class="import-tab manage-tab" data-tab="tx" data-i18n="manage.tabTx">取引</button>
           <button class="import-tab manage-tab" data-tab="cash" data-i18n="manage.tabCash">現金・預金</button>
           <button class="import-tab manage-tab" data-tab="metal" data-i18n="manage.tabMetal">貴金属</button>
           <button class="import-tab manage-tab" data-tab="estate" data-i18n="manage.tabEstate">不動産</button>
@@ -1351,6 +1352,74 @@
                     <th class="num" data-i18n="th.quantity">数量</th>
                     <th class="num" data-i18n="th.avgCost">平均取得単価</th>
                     <th data-i18n="th.asOf">基準日</th>
+                    <th class="num" data-i18n="th.actions">操作</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+
+        <!-- 取引タブ（取引履歴をダウンロードできない証券会社のぶんを1件ずつ） -->
+        <div id="manage-tab-tx" class="manage-tab-content hidden">
+          <section class="card import-section">
+            <h2 data-i18n="manage.txTitle">取引を登録</h2>
+            <p class="card-hint" data-i18n="manage.txHint">取引履歴をダウンロードできない証券会社の購入・売却を、1件ずつ登録します。登録した取引は、取り込んだ取引履歴と同じように、銘柄詳細の推移グラフ（最初の取込より前のさかのぼり）と取得原価の計算に使われます。</p>
+            <div class="manual-add-grid">
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.txAccount">口座 *</label>
+                <select id="mtx-account" class="settings-input"></select>
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.security">銘柄 *</label>
+                <select id="mtx-security" class="settings-input"></select>
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.txType">取引 *</label>
+                <select id="mtx-type" class="settings-input">
+                  <option value="buy" data-i18n="tx.type.buy">買付</option>
+                  <option value="sell" data-i18n="tx.type.sell">売却</option>
+                </select>
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.txDate">約定日 *</label>
+                <input id="mtx-date" class="settings-input" type="date" />
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.txQuantity">数量（株数・口数） *</label>
+                <input id="mtx-quantity" class="settings-input" type="number" step="any" min="0" />
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.txPrice">単価（投信は1万口あたりの基準価額）</label>
+                <input id="mtx-price" class="settings-input" type="number" step="any" min="0"
+                  data-i18n-placeholder="manage.txPricePh" placeholder="空欄なら約定日の価格" />
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.txFee">手数料</label>
+                <input id="mtx-fee" class="settings-input" type="number" step="any" min="0" placeholder="0" />
+              </div>
+            </div>
+            <div class="settings-actions">
+              <button id="mtx-save" class="settings-save-btn" data-i18n="btn.add">追加</button>
+            </div>
+            <div id="mtx-result" class="settings-result hidden"></div>
+          </section>
+
+          <section class="card import-section">
+            <h2 data-i18n="manage.txListTitle">登録済みの取引（手動）</h2>
+            <p class="card-hint" data-i18n="manage.txListHint">ここで登録した取引だけが出ます。取り込んだ取引履歴は、データ取込の取込履歴からファイルごと巻き戻します。</p>
+            <div class="table-wrap">
+              <table id="manage-tx-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="tx.thTradeDate">約定日</th>
+                    <th data-i18n="th.account">口座</th>
+                    <th data-i18n="th.security">銘柄</th>
+                    <th data-i18n="tx.thType">種類</th>
+                    <th class="num" data-i18n="th.quantity">数量</th>
+                    <th class="num" data-i18n="tx.thUnitPrice">単価</th>
+                    <th class="num" data-i18n="tx.thNetAmount">受渡金額</th>
                     <th class="num" data-i18n="th.actions">操作</th>
                   </tr>
                 </thead>

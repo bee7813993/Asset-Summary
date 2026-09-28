@@ -24,6 +24,7 @@ import logging
 import os
 import sqlite3
 import threading
+import uuid
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
@@ -43,6 +44,8 @@ from ..core.models import (
     PriceSourceStatus,
     PriceSourceType,
     Security,
+    Transaction,
+    TxType,
     Unit,
 )
 from ..core import (
@@ -388,6 +391,7 @@ def _ser_transaction(tx: Any, accounts: dict[int, Any]) -> dict[str, Any]:
         "currency": tx.currency,
         "lot_label": tx.lot_label,
         "note": tx.note,
+        "origin": tx.origin,
         "batch_id": tx.batch_id,
     }
 
@@ -2123,6 +2127,147 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
             "warnings": [],
             "generated_at": _utcnow_iso(),
         }
+
+    # ------------------------------------------------------------------
+    # 手動の取引（取引履歴をダウンロードできない証券会社のぶん）
+    #
+    # 取込と同じ台帳に origin='manual' で入れる。どのバッチにも属さないので
+    # 取込の巻き戻しでは消えず、ここから1件ずつ消す。
+    # ------------------------------------------------------------------
+
+    def _price_on(
+        sec: Security, day: date, warnings: list[str]
+    ) -> tuple[str, Decimal] | None:
+        """約定日（無ければ7日前まで）の単価。見つからなければ None。"""
+        if sec.price_source_status == PriceSourceStatus.LINKED:
+            try:
+                ensure_price_history(
+                    store, [sec], day - timedelta(days=10), day, warn=warnings.append
+                )
+            except Exception as e:  # noqa: BLE001
+                warnings.append(f"価格取得エラー: {e}")
+        series, ccy = store.price_series_for_security(
+            sec, start=(day - timedelta(days=7)).isoformat(), end=day.isoformat()
+        )
+        # 取込時の記載値（円建て）しか無い外貨建て銘柄などは、建値通貨の
+        # 単価として使えない
+        if not series or (ccy or sec.currency) != sec.currency:
+            return None
+        found = max(series)
+        return (found, series[found])
+
+    @app.get("/api/transactions/manual")
+    def api_manual_transactions() -> dict[str, Any]:
+        accounts = {a.id: a for a in store.list_accounts()}
+        secs = store.securities_by_id()
+        return {
+            "transactions": [
+                {
+                    **_ser_transaction(t, accounts),
+                    "security": secs[t.security_id].name if t.security_id in secs else "",
+                }
+                for t in store.list_transactions(origin="manual")
+            ],
+            "warnings": [],
+            "generated_at": _utcnow_iso(),
+        }
+
+    @app.post("/api/transactions")
+    def api_manual_transaction_create(
+        payload: dict[str, Any] = Body(...)
+    ) -> dict[str, Any]:
+        account = store.get_account(
+            _to_int(payload.get("account_id"), "account_id", minimum=1)
+        )
+        if account is None:
+            raise HTTPException(status_code=404, detail="口座が見つかりません")
+        sec = store.get_security(
+            _to_int(payload.get("security_id"), "security_id", minimum=1)
+        )
+        if sec is None:
+            raise HTTPException(status_code=404, detail="銘柄が見つかりません")
+        tx_type = str(payload.get("tx_type") or "")
+        if tx_type not in (TxType.BUY.value, TxType.SELL.value):
+            raise HTTPException(
+                status_code=400, detail="tx_type は buy か sell で指定してください"
+            )
+        trade_date = _to_date(payload.get("trade_date"), "trade_date")
+        if trade_date > date.today():
+            raise HTTPException(status_code=400, detail="未来の約定日は登録できません")
+        quantity = _to_decimal(payload.get("quantity"), "quantity")
+        if quantity <= 0:
+            raise HTTPException(status_code=400, detail="数量は正の数で指定してください")
+        unit_price = _to_decimal_opt(payload.get("unit_price"), "unit_price")
+        if unit_price is not None and unit_price <= 0:
+            raise HTTPException(status_code=400, detail="単価は正の数で指定してください")
+        fee = _to_decimal_opt(payload.get("fee"), "fee") or ZERO
+        if fee < 0:
+            raise HTTPException(status_code=400, detail="手数料は 0 以上で指定してください")
+
+        warnings: list[str] = []
+        price_from = None
+        if unit_price is None:
+            # 単価が無いまま入れると取得費 0 円の買付になり、それで保有が説明
+            # できてしまうと評価損益が「全額が利益」に化ける。約定日の価格
+            # （投信なら基準価額）で埋め、無ければ入力してもらう
+            found = _price_on(sec, trade_date, warnings)
+            if found is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="約定日の価格が見つからないため、単価を入力してください",
+                )
+            price_from, unit_price = found
+
+        gross = quantity * unit_price / Decimal(sec.price_unit_divisor or 1)
+        is_buy = tx_type == TxType.BUY.value
+        tx_id = store.add_manual_transaction(
+            Transaction(
+                dedup_key=f"manual:{uuid.uuid4().hex}",
+                account_id=account.id,
+                security_id=sec.id,
+                trade_date=trade_date,
+                tx_type=TxType(tx_type),
+                quantity=quantity if is_buy else -quantity,
+                unit_price=unit_price,
+                gross_amount=gross,
+                fee=fee,
+                net_amount=-(gross + fee) if is_buy else gross - fee,
+                currency=sec.currency,
+                origin="manual",
+                note=f"単価は {price_from} の価格から補完" if price_from else None,
+            )
+        )
+        recompute_cost_basis(store)
+
+        # 入れた取引が推移グラフに届いたかを返す（届かないならその理由）
+        snaps = [s for s in store.all_snapshots() if s.security_id == sec.id]
+        group = [s for s in snaps if s.account_id == account.id]
+        accounts = {a.id: a for a in store.list_accounts()}
+        return {
+            "ok": True,
+            "transaction": _ser_transaction(store.get_transaction(tx_id), accounts),
+            "price_filled_from": price_from,
+            "chart_status": cost_basis.quantity_path_status(
+                store.list_transactions(security_id=sec.id), snaps, account.id, sec.id
+            ),
+            "first_snapshot": min(s.as_of_date for s in group).isoformat() if group else None,
+            "warnings": warnings,
+            "generated_at": _utcnow_iso(),
+        }
+
+    @app.delete("/api/transactions/{tx_id}")
+    def api_manual_transaction_delete(tx_id: int) -> dict[str, Any]:
+        tx = store.get_transaction(tx_id)
+        if tx is None:
+            raise HTTPException(status_code=404, detail="取引が見つかりません")
+        if tx.origin != "manual":
+            raise HTTPException(
+                status_code=409,
+                detail="取り込んだ取引は、取込履歴からファイルごと巻き戻してください",
+            )
+        store.delete_transaction(tx_id)
+        recompute_cost_basis(store)
+        return {"ok": True}
 
     @app.get("/api/cost-basis")
     def api_cost_basis(

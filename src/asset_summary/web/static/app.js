@@ -3778,7 +3778,8 @@ async function loadTransactionHistory(securityId, secCur, currency, append) {
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td>${escapeHtml(tx.trade_date)}</td>
-      <td>${escapeHtml(txTypeLabel(tx.tx_type))}</td>
+      <td>${escapeHtml(txTypeLabel(tx.tx_type))}${tx.origin === "manual"
+        ? ` <span class="ref-badge" title="${escapeHtml(tx.note || "")}">${t("tx.manualBadge")}</span>` : ""}</td>
       <td>${escapeHtml(tx.account || "")}</td>
       <td class="num">${fmtAmount(tx.quantity)}</td>
       <td class="num">${fmtPrice(tx.unit_price, secCur)}</td>
@@ -3877,7 +3878,7 @@ document.getElementById("inbox-scan-btn").addEventListener("click", async () => 
 
 // ---- 手動登録ページ ----
 
-const MANAGE_TABS = ["sec", "cash", "metal", "estate", "crypto", "pension"];
+const MANAGE_TABS = ["sec", "tx", "cash", "metal", "estate", "crypto", "pension"];
 
 document.querySelectorAll(".manage-tab").forEach((btn) => {
   btn.addEventListener("click", () => {
@@ -3887,6 +3888,8 @@ document.querySelectorAll(".manage-tab").forEach((btn) => {
       const el = document.getElementById(`manage-tab-${tab}`);
       if (el) el.classList.toggle("hidden", tab !== btn.dataset.tab);
     });
+    // 他のタブで口座・銘柄が増えていることがあるので開くたびに揃える
+    if (btn.dataset.tab === "tx") _syncManualTxSelects();
   });
 });
 
@@ -3898,7 +3901,7 @@ async function _loadSecuritiesCache() {
 
 async function loadManagePage() {
   // 日付初期値
-  ["nh-as-of", "cash-as-of", "metal-as-of", "re-as-of", "pp-as-of", "re-val-date"].forEach((id) => {
+  ["nh-as-of", "cash-as-of", "metal-as-of", "re-as-of", "pp-as-of", "re-val-date", "mtx-date"].forEach((id) => {
     const el = document.getElementById(id);
     if (el && !el.value) el.value = todayISO();
   });
@@ -3910,7 +3913,9 @@ async function loadManagePage() {
   }
   renderSecuritiesTable();
   _syncSecuritySelects();
+  _syncManualTxSelects();
   loadManageHoldings();
+  loadManualTransactions();
   loadManageClassLists();
   loadCsStatusCard();
 }
@@ -4513,6 +4518,130 @@ async function loadManageHoldings() {
     tbody.innerHTML = `<tr><td colspan="7" class="muted">${t("status.error")}${escapeHtml(e.message)}</td></tr>`;
   }
 }
+
+// ---- 手動の取引（取引履歴をダウンロードできない証券会社のぶん） ----
+
+// 売買という形を取らない資産（残高・記載評価額で持つもの）は選択肢に出さない
+const _NO_TRADE_CLASSES = new Set(["cash", "point", "pension", "real_estate"]);
+
+function _syncManualTxSelects() {
+  const acctSel = document.getElementById("mtx-account");
+  const prevAcct = acctSel.value;
+  acctSel.innerHTML = "";
+  _accounts.forEach((a) => {
+    const opt = document.createElement("option");
+    opt.value = a.id;
+    opt.textContent = a.display_name || a.name;
+    acctSel.appendChild(opt);
+  });
+  if ([...acctSel.options].some((o) => o.value === prevAcct)) acctSel.value = prevAcct;
+
+  const secSel = document.getElementById("mtx-security");
+  const prevSec = secSel.value;
+  secSel.innerHTML = "";
+  _securities.filter((s) => !_NO_TRADE_CLASSES.has(s.asset_class)).forEach((s) => {
+    const opt = document.createElement("option");
+    opt.value = s.id;
+    opt.textContent = s.name + (s.code ? ` (${s.code})` : "");
+    secSel.appendChild(opt);
+  });
+  if ([...secSel.options].some((o) => o.value === prevSec)) secSel.value = prevSec;
+}
+
+async function loadManualTransactions() {
+  const tbody = document.querySelector("#manage-tx-table tbody");
+  tbody.innerHTML = `<tr><td colspan="8" class="loading">${t("label.loading")}</td></tr>`;
+  try {
+    const data = await fetchJSON("/api/transactions/manual");
+    const rows = data.transactions || [];
+    tbody.innerHTML = "";
+    rows.forEach((tx) => {
+      const type = txTypeLabel(tx.tx_type);
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td>${escapeHtml(tx.trade_date)}</td>
+        <td>${escapeHtml(tx.account || "")}</td>
+        <td>${escapeHtml(tx.security || "")}</td>
+        <td>${escapeHtml(type)}</td>
+        <td class="num">${fmtAmount(tx.quantity)}</td>
+        <td class="num" title="${escapeHtml(tx.note || "")}">${fmtPrice(tx.unit_price, tx.currency)}</td>
+        <td class="num">${fmtMoney(tx.net_amount, tx.currency)}</td>
+        <td class="num"><button class="delete-btn" title="${t("btn.delete")}">✕ ${t("btn.delete")}</button></td>
+      `;
+      tr.querySelector(".delete-btn").addEventListener("click", () => {
+        openConfirmDialog(
+          t("manage.txDeleteTitle"),
+          t("manage.txDeleteMsg", {
+            date: tx.trade_date, account: tx.account || "", name: tx.security || "",
+            type, quantity: fmtAmount(Math.abs(Number(tx.quantity))),
+          }),
+          async () => {
+            await apiCall(`/api/transactions/${encodeURIComponent(tx.id)}`, "DELETE");
+            loadManualTransactions();
+          }
+        );
+      });
+      tbody.appendChild(tr);
+    });
+    if (rows.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="8" class="muted">${t("manage.txNone")}</td></tr>`;
+    }
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="8" class="muted">${t("status.error")}${escapeHtml(e.message)}</td></tr>`;
+  }
+}
+
+document.getElementById("mtx-save").addEventListener("click", async () => {
+  hideResult("mtx-result");
+  const acctSel = document.getElementById("mtx-account");
+  const securityId = document.getElementById("mtx-security").value;
+  const tradeDate = document.getElementById("mtx-date").value;
+  const qty = document.getElementById("mtx-quantity").value;
+  if (!acctSel.value || !securityId || !tradeDate || qty === "") {
+    showResult("mtx-result", false, t("status.required"));
+    return;
+  }
+  const body = {
+    account_id: Number(acctSel.value),
+    security_id: Number(securityId),
+    tx_type: document.getElementById("mtx-type").value,
+    trade_date: tradeDate,
+    quantity: qty,
+  };
+  const price = document.getElementById("mtx-price").value;
+  if (price !== "") body.unit_price = price;
+  const fee = document.getElementById("mtx-fee").value;
+  if (fee !== "") body.fee = fee;
+  try {
+    const d = await apiCall("/api/transactions", "POST", body);
+    // 登録できたことに加えて、推移グラフに届いたか（届かないなら理由）を返す
+    const parts = [t("status.addDone")];
+    if (d.price_filled_from) {
+      parts.push(t("manage.txPriceFilled", {
+        date: d.price_filled_from,
+        price: fmtPrice(d.transaction.unit_price, d.transaction.currency),
+      }));
+    }
+    const statusKey = `manage.txStatus.${d.chart_status}`;
+    if (TRANSLATIONS.ja[statusKey] !== undefined) {
+      parts.push(t(statusKey, {
+        account: acctSel.options[acctSel.selectedIndex].textContent,
+        name: (_securities.find((s) => String(s.id) === securityId) || {}).name || "",
+        date: d.first_snapshot || "",
+      }));
+    }
+    showResult("mtx-result", true, parts.join(" "));
+    document.getElementById("mtx-result").classList.toggle(
+      "warn", !["traced", "no_earlier_trades"].includes(d.chart_status));
+    // 続けて同じ口座・銘柄の別の日を入れやすいよう、数量・単価・手数料だけ空ける
+    ["mtx-quantity", "mtx-price", "mtx-fee"].forEach((id) => {
+      document.getElementById(id).value = "";
+    });
+    loadManualTransactions();
+  } catch (e) {
+    showResult("mtx-result", false, t("status.addFail", { error: e.message }));
+  }
+});
 
 // 既存銘柄の再利用 or 新規作成 → security_id を返す
 async function _findOrCreateSecurity(match, createBody) {

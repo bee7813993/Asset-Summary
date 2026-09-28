@@ -15,6 +15,7 @@ import pytest
 from asset_summary.core.cost_basis import (
     Anchor,
     build_anchors,
+    quantity_path_status,
     quantity_paths,
     reconcile_all,
     reconcile_closed,
@@ -569,3 +570,16 @@ def test_paths_are_kept_per_account():
     paths = quantity_paths(txs, snaps)
     assert paths[(1, 10)].at(_day("2026-02-01")) == (D("100"), False)
     assert paths[(2, 10)].at(_day("2026-02-01")) == (D("0"), False)
+
+
+def test_quantity_path_status_names_each_reason():
+    """手動登録の直後に「グラフに届いたか・届かない理由」を返すための判定。"""
+    snaps = [_lot(qty="100", as_of="2026-08-04")]
+    status = lambda txs, snaps=snaps, acct=1: quantity_path_status(txs, snaps, acct, 10)  # noqa: E731
+    assert status([buy("2026-01-10", 100, 1000)]) == "traced"
+    assert status([buy("2026-01-10", 100, 1000)], acct=2) == "no_snapshot"
+    assert status([dividend("2026-01-10", 500)]) == "no_trades"
+    assert status([buy("2026-08-10", 10, 1000)]) == "no_earlier_trades"
+    assert status([buy("2026-01-10", 150, 1000)]) == "inconsistent"
+    two_starts = snaps + [_lot(lot_seq=1, qty="30", as_of="2026-09-10")]
+    assert status([buy("2026-01-10", 100, 1000)], snaps=two_starts) == "lots_differ"

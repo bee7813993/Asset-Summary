@@ -581,6 +581,8 @@ tbody tr:hover { background: var(--bg-elev); }
 }
 .settings-result.ok { background: #1a3a28; color: #3fb950; }
 .settings-result.err { background: #3a1a1a; color: #f85149; }
+/* 処理はできたが、期待した効果までは届かなかった（登録した取引がグラフに使われない等） */
+.settings-result.warn { background: #3a2e12; color: #e3b341; }
 
 /* ---- フィルタ系入力 ---- */
 .filter-group {
