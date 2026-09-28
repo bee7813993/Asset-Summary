@@ -379,10 +379,12 @@ def _ser_transfer_candidate(c: Any, accounts: dict[int, Any]) -> dict[str, Any]:
         "first_date": a.date.isoformat(),
         "quantity": _s(a.quantity),
         "avg_cost": _s(a.avg_cost),
-        "kind": a.kind,                 # snapshot | transfer_in | buy
+        "kind": a.kind,                 # snapshot | transfer_in | buy | other
         "quantity_match": c.quantity_match,
         "cost_match": c.cost_match,
         "early": c.early,
+        # 移管先が移管の入庫を元の取得日の日付で記録している（楽天証券など）
+        "backdated": a.backdated,
     }
 
 

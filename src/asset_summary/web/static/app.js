@@ -4637,6 +4637,7 @@ function _transferCandidateTags(c) {
   if (c.cost_match === false) tags.push(t("tr.tagCostDiffers"));
   if (c.early) tags.push(t("tr.tagEarly"));
   if (c.kind === "buy") tags.push(t("tr.tagBuy"));
+  if (c.backdated) tags.push(t("tr.tagBackdated"));
   return tags;
 }
 
@@ -4744,9 +4745,10 @@ async function loadTransfers() {
       btn.className = "settings-save-btn secondary transfer-cand";
       const tags = _transferCandidateTags(c);
       btn.innerHTML = `${escapeHtml(t("tr.linkTo", { account: c.account }))}
-        <span class="transfer-cand-sub">${escapeHtml(t("tr.candLine", {
-          date: c.first_date, qty: _transferQty(row.security_id, c.quantity),
-        }))}${tags.length ? " · " + escapeHtml(tags.join("・")) : ""}</span>`;
+        <span class="transfer-cand-sub">${escapeHtml(c.backdated
+          ? t("tr.candBackdated", { qty: _transferQty(row.security_id, c.quantity) })
+          : t("tr.candLine", { date: c.first_date, qty: _transferQty(row.security_id, c.quantity) })
+        )}${tags.length ? " · " + escapeHtml(tags.join("・")) : ""}</span>`;
       btn.addEventListener("click", () => _saveTransfer(row, c.account_id));
       cands.appendChild(btn);
     });

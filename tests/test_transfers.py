@@ -191,6 +191,58 @@ def test_manual_decisions_override_the_automatic_ones():
     assert out is not None and decision.id == 7
 
 
+# 移管先の証券会社が、移管で受け入れたロットを元の取得日の日付で入庫として記録する
+# （楽天証券の取引履歴がこう出す）。移管より前の記録は入庫だけ
+BACKDATED_B = [
+    _tx(B, "2019-03-07", TxType.TRANSFER_IN, "100", "1200"),
+    _tx(B, "2025-03-28", TxType.TRANSFER_IN, "100", "1200"),
+]
+
+
+def test_transfer_ins_dated_at_acquisition_are_the_transfer_arriving():
+    res = transfers.resolve(LEDGER_A + BACKDATED_B, [_snap(B, "2026-08-04", "200")])
+    assert _route(res) == [(A, B, "2025-12-23", D("200"), "auto")]
+    (cand,) = res.candidates[(SEC, A, date(2025, 12, 23))]
+    assert cand.arrival.backdated and not cand.early and cand.cost_match
+    assert set(res.links[0].absorbed) == {transfers.tx_key(t) for t in BACKDATED_B}
+
+
+def test_other_records_before_the_transfer_mean_it_was_already_held():
+    """移管より前に配当（や買付・記録）があれば、移管先の口座は前から持っていた。"""
+    dividend = Transaction(account_id=B, security_id=SEC, trade_date=date(2022, 6, 20),
+                           tx_type=TxType.DIVIDEND, net_amount=D("3000"))
+    res = transfers.resolve(LEDGER_A + BACKDATED_B + [dividend], [_snap(B, "2026-08-04", "200")])
+    assert res.links == []
+    (_out, (cand,)), = res.unresolved
+    assert cand.early and not cand.arrival.backdated
+
+
+def test_a_chain_through_a_broker_that_dates_transfers_at_acquisition():
+    """A → B（取得日の日付で入庫）→ C。B は今は持っていない（スナップショットが無い）。"""
+    ledger_a = [
+        _tx(A, "2025-11-10", TxType.BUY, "100", "971"),
+        _tx(A, "2025-12-23", TxType.TRANSFER_OUT, "100", "971"),
+    ]
+    ledger_b = [
+        _tx(B, "2025-11-10", TxType.TRANSFER_IN, "100", "971"),     # 取得日の日付
+        _tx(B, "2026-07-16", TxType.TRANSFER_OUT, "100", "971"),
+    ]
+    snaps = [_snap(C, "2026-08-04", "100", cost="971")]
+    txs = ledger_a + ledger_b
+    res = transfers.resolve(txs, snaps)
+    assert _route(res) == [
+        (A, B, "2025-12-23", D("100"), "auto"),
+        (B, C, "2026-07-16", D("100"), "auto"),
+    ]
+    paths = cost_basis.quantity_paths(txs, snaps, res.links)
+    # B は取得日の日付の入庫ではなく、移管の日（12/23）から持っていたとして描く
+    assert paths[(B, SEC)].at(date(2025, 12, 1)) == (D("0"), False)
+    for day, want in (("2025-11-09", "0"), ("2025-11-10", "100"), ("2025-12-22", "100"),
+                      ("2025-12-23", "100"), ("2026-07-15", "100"), ("2026-07-16", "100"),
+                      ("2026-08-03", "100")):
+        assert _held(paths, day) == D(want), day
+
+
 # ----------------------------------------------------------------------
 # 推移（保有数の経路）
 # ----------------------------------------------------------------------
@@ -217,6 +269,18 @@ def test_the_chain_draws_one_continuous_line():
     assert _held(paths, "2026-08-03") == D("200")     # B の最初の記録の前日
     # B・C は最初の記録から記録どおり。C の最初の記録より前は 0（B が持っていた）
     assert paths[(C, SEC)].at(date(2026, 8, 31)) == (D("0"), False)
+    assert paths[(B, SEC)].at(date(2025, 12, 22)) == (D("0"), False)
+
+
+def test_transfer_ins_dated_at_acquisition_are_counted_from_the_transfer():
+    """取得日の日付の入庫をそのまま数えると、移管元の履歴と二重になる。"""
+    snaps = [_snap(B, "2026-08-04", "200")]
+    txs = LEDGER_A + BACKDATED_B
+    links = transfers.resolve(txs, snaps).links
+    paths = cost_basis.quantity_paths(txs, snaps, links)
+    assert _held(paths, "2020-01-01") == D("100")      # A の 100 だけ（B の入庫は数えない）
+    assert _held(paths, "2025-12-22") == D("200")
+    assert _held(paths, "2025-12-23") == D("200")      # B に移った日
     assert paths[(B, SEC)].at(date(2025, 12, 22)) == (D("0"), False)
 
 
@@ -378,3 +442,29 @@ def test_security_detail_marks_the_account_it_moved_out_of(client, moved):
     assert (row["transferred_to"], row["transferred_on"]) == ("B証券", "2025-12-23")
     assert row["realized_pl"] in (None, "0")        # 移管は売却ではない
     assert not any(w["code"] == "CLOSED_POSITION" for w in row["warnings"])
+
+
+def test_security_history_counts_backdated_transfer_ins_once(client, store, moved):
+    """移管先の取引履歴が移管の入庫を取得日の日付で持っていても、二重に数えない。"""
+    store.create_batch(ImportBatch(id="ledger-b", source_kind="broker_csv"))
+    store.insert_transactions(
+        [
+            Transaction(dedup_key=f"b{i}", account_id=moved["b"], security_id=moved["sec"],
+                        trade_date=t.trade_date, tx_type=t.tx_type, quantity=t.quantity,
+                        unit_price=t.unit_price)
+            for i, t in enumerate(BACKDATED_B)
+        ],
+        batch_id="ledger-b",
+    )
+    data = client.get(
+        "/api/portfolio-history",
+        params={"range": "all", "scope": f"security:{moved['sec']}"},
+    ).json()
+    pts = {p["t"]: p for p in data["points"]}
+    assert pts["2020-01-01"]["quantity"] == "100"
+    assert pts["2025-12-22"]["quantity"] == "200"
+    assert pts["2025-12-23"]["quantity"] == "200"
+    (move,) = data["transfers"]
+    assert (move["from_account"], move["to_account"]) == ("A証券", "B証券")
+    listed = client.get("/api/transfers").json()
+    assert [c["backdated"] for c in listed["links"][0]["candidates"]] == [True]

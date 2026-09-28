@@ -16,7 +16,16 @@
 - スナップショットで保有が 0 になった日。前の記録からの間に取引履歴の売却・出庫が
   あれば、売却か既知の出庫なので数えない
 
-移管先（入ってきた記録）: 別の口座に、その銘柄がはじめて現れた記録。
+移管先（入ってきた記録）: 別の口座に、その銘柄が現れた記録。移管元の出来事ごとに
+見る（_arrival）。
+- 移管の前後（7 日前〜30 日後。受渡日で見てもよい）の入庫は、その移管が届いたもの
+- 移管より前の記録が入庫だけ（スナップショットも無い）なら、移管先の証券会社が
+  移管で受け入れたロットを元の取得日の日付で記録している（楽天証券の取引履歴が
+  こう出す）。これも移管が届いたものとみなす（backdated）。推移ではこの入庫を
+  移管の日へ移して数える（absorbed）。取得原価の計算は元の日付のまま使う
+- 移管より前に入庫以外の記録（買付・配当・スナップショット）がある口座は、移管より
+  前から持っていた（early）。手動の候補にだけ出す
+- どれでもなければ、移管の後の最初の記録（スナップショットか取引）
 
 ## 自動で結び付ける条件
 
@@ -51,6 +60,8 @@ from .models import HoldingSnapshot, Transaction, TxType
 CANCEL_DAYS = 10
 # 移管先の記録が移管元の出庫より早くてよい日数（受渡日・計上日のずれ）
 EARLY_DAYS = 7
+# 移管先の入庫の計上が移管元の出庫より遅れてよい日数
+ARRIVE_DAYS = 30
 # 自動で結び付ける、移管から移管先の最初の記録までの日数。取込を始めた日が
 # 移管から何か月も後になることはあるが、何年も後に同じ株数を買い直したものを
 # 移管とみなさないための上限
@@ -78,15 +89,18 @@ class TransferOut:
 
 @dataclass(frozen=True)
 class Arrival:
-    """ある口座にその銘柄がはじめて現れた記録（移管先の候補）。"""
+    """移管元の出来事ひとつに対して、ある口座にその銘柄がどう現れたか（移管先の候補）。"""
 
     security_id: int
     account_id: int
-    date: date
-    last_date: date                  # その口座での最後の記録（移管前から持っていた口座用）
+    date: date                       # 記録の上で現れた日（表示用）
+    effective: date                  # 移管として届いた日（候補の比べ合い・期限の判定用）
     quantity: Decimal
     avg_cost: Decimal | None
-    kind: str                        # "snapshot" | "transfer_in" | "buy"
+    kind: str                        # "snapshot" | "transfer_in" | "buy" | "other"
+    early: bool = False              # 移管より前からその口座に保有があった
+    backdated: bool = False          # 移管の入庫を元の取得日の日付で記録している
+    absorbed: tuple[Any, ...] = ()   # 移管として数える移管先の入庫（tx_key）
 
 
 @dataclass(frozen=True)
@@ -94,7 +108,10 @@ class Candidate:
     arrival: Arrival
     quantity_match: bool
     cost_match: bool | None          # None = 比べられない
-    early: bool                      # 移管より前からその口座に保有があった
+
+    @property
+    def early(self) -> bool:
+        return self.arrival.early
 
 
 @dataclass(frozen=True)
@@ -110,6 +127,14 @@ class TransferLink:
     source: str                      # 移管元の記録: "ledger" | "snapshot" | "manual"
     cost_match: bool | None = None
     manual_id: int | None = None
+    # 移管先の取引履歴のうち、この移管が届いたものとして数える入庫（tx_key）。
+    # 推移ではこれを外し、代わりに移管の日の入庫として数える
+    absorbed: tuple[Any, ...] = ()
+
+
+def tx_key(t: Transaction) -> tuple[str, int]:
+    """取引の同一性（DB の id。まだ保存していない取引はオブジェクトそのもの）。"""
+    return ("id", t.id) if t.id is not None else ("obj", id(t))
 
 
 @dataclass(frozen=True)
@@ -306,46 +331,82 @@ def snapshot_transfer_outs(
 # ----------------------------------------------------------------------
 
 
-def arrivals(
-    transactions: Sequence[Transaction], snapshots: Sequence[HoldingSnapshot]
-) -> list[Arrival]:
-    """口座×銘柄ごとに、その銘柄がはじめて現れた記録。"""
-    snaps: dict[tuple[int, int], list[HoldingSnapshot]] = {}
-    for s in snapshots:
-        snaps.setdefault((s.account_id, s.security_id), []).append(s)
-    txs: dict[tuple[int, int], list[Transaction]] = {}
-    for t in transactions:
-        if t.security_id is not None and _quantity_step(t) is not None:
-            txs.setdefault((t.account_id, t.security_id), []).append(t)
+def _arrival(
+    out: TransferOut,
+    account_id: int,
+    txs: Sequence[Transaction],
+    snaps: Sequence[HoldingSnapshot],
+) -> Arrival | None:
+    """移管元の記録 out に対して、その口座にその銘柄がどう現れたか（無ければ None）。
 
-    out: list[Arrival] = []
-    for key in set(snaps) | set(txs):
-        account_id, security_id = key
-        group_snaps = snaps.get(key, [])
-        group_txs = _ordered(txs.get(key, []))
-        first_snap = min((s.as_of_date for s in group_snaps), default=None)
-        first_tx = group_txs[0].trade_date if group_txs else None
-        last = max(
-            [s.as_of_date for s in group_snaps] + [t.trade_date for t in group_txs]
-        )
-        if first_tx is not None and (first_snap is None or first_tx < first_snap):
-            day = [t for t in group_txs if t.trade_date == first_tx]
-            moved_in = [t for t in day if t.tx_type is TxType.TRANSFER_IN]
-            if moved_in:
-                quantity = sum((_abs(t.quantity) for t in moved_in), ZERO)
-                cost = _weighted_cost((_abs(t.quantity), t.unit_price) for t in moved_in)
-                kind = "transfer_in"
-            else:
-                quantity = _running_balance(day).get(first_tx, ZERO)
-                cost = None
-                kind = "buy" if any(t.tx_type is TxType.BUY for t in day) else "transfer_in"
-            out.append(Arrival(security_id, account_id, first_tx, last, quantity, cost, kind))
-        elif first_snap is not None:
-            _d, total, cost = _totals_by_date(group_snaps)[0]
-            out.append(
-                Arrival(security_id, account_id, first_snap, last, total, cost, "snapshot")
+    txs は口座×銘柄の取引すべて（配当も含む。移管より前から持っていたかの判定に使う）。
+    """
+    lo = out.date - timedelta(days=EARLY_DAYS)
+    hi = out.date + timedelta(days=ARRIVE_DAYS)
+
+    def near(d: date | None) -> bool:
+        return d is not None and lo <= d <= hi
+
+    moved = [
+        t for t in txs
+        if t.tx_type is TxType.TRANSFER_IN and (near(t.trade_date) or near(t.settle_date))
+    ]
+    moved_keys = {tx_key(t) for t in moved}
+    prior = [t for t in txs if t.trade_date < lo and tx_key(t) not in moved_keys]
+    prior_snaps = [s for s in snaps if s.as_of_date < lo and s.quantity > QTY_EPSILON]
+    if not moved and not any(t.trade_date >= lo for t in txs) and not any(
+        s.as_of_date >= lo for s in snaps
+    ):
+        return None     # 移管より後の記録が無い口座は移管先になりえない
+
+    backdated: list[Transaction] = []
+    if prior or prior_snaps:
+        if prior_snaps or any(t.tx_type is not TxType.TRANSFER_IN for t in prior):
+            first = min([t.trade_date for t in txs] + [s.as_of_date for s in snaps])
+            return Arrival(
+                out.security_id, account_id, first, first,
+                quantity=_quantity_on(first, txs, snaps), avg_cost=None,
+                kind="other", early=True,
             )
-    return out
+        backdated = prior
+
+    rows = _ordered([*backdated, *moved])
+    if rows:
+        return Arrival(
+            out.security_id, account_id,
+            date=rows[0].trade_date,
+            effective=out.date,
+            quantity=sum((_abs(t.quantity) for t in rows), ZERO),
+            avg_cost=_weighted_cost((_abs(t.quantity), t.unit_price) for t in rows),
+            kind="transfer_in",
+            backdated=bool(backdated),
+            absorbed=tuple(tx_key(t) for t in rows),
+        )
+
+    # 入庫の記録は無い: 移管の後の最初の記録
+    first_snap = min((s.as_of_date for s in snaps if s.as_of_date >= lo), default=None)
+    steps = [t for t in txs if t.trade_date >= lo and _quantity_step(t) is not None]
+    first_tx = min((t.trade_date for t in steps), default=None)
+    if first_tx is not None and (first_snap is None or first_tx < first_snap):
+        day = _ordered([t for t in steps if t.trade_date == first_tx])
+        return Arrival(
+            out.security_id, account_id, first_tx, first_tx,
+            quantity=_running_balance(day).get(first_tx, ZERO), avg_cost=None,
+            kind="buy" if any(t.tx_type is TxType.BUY for t in day) else "other",
+        )
+    if first_snap is None:
+        return None
+    totals = {d: (q, c) for d, q, c in _totals_by_date(snaps)}
+    total, cost = totals[first_snap]
+    return Arrival(out.security_id, account_id, first_snap, first_snap, total, cost, "snapshot")
+
+
+def _quantity_on(day: date, txs: Sequence[Transaction], snaps: Sequence[HoldingSnapshot]) -> Decimal:
+    """その日の記録の保有数（移管より前から持っていた口座の表示用）。"""
+    on_day = [s for s in snaps if s.as_of_date == day]
+    if on_day:
+        return {d: q for d, q, _c in _totals_by_date(snaps)}[day]
+    return _running_balance(_ordered(t for t in txs if t.trade_date <= day)).get(day, ZERO)
 
 
 def _cost_match(carried: Decimal | None, avg_cost: Decimal | None) -> bool | None:
@@ -356,32 +417,31 @@ def _cost_match(carried: Decimal | None, avg_cost: Decimal | None) -> bool | Non
 
 def candidates(
     out: TransferOut,
-    found: Sequence[Arrival],
+    by_account: dict[int, tuple[list[Transaction], list[HoldingSnapshot]]],
     consumed: set[tuple[int, int]] | frozenset = frozenset(),
 ) -> list[Candidate]:
     """移管元の記録に対する移管先の候補（もっともらしい順）。
 
-    移管の後もその銘柄を持っている（記録がある）別の口座を候補にする。移管より
-    前から持っていた口座（early）も、移管で買い増した場合のために手動用として残す。
+    by_account はその銘柄の口座ごとの (取引, スナップショット)。移管より前から持って
+    いた口座（early）も、移管で買い増した場合のために手動用として残す。
     """
-    earliest = out.date - timedelta(days=EARLY_DAYS)
     res: list[Candidate] = []
-    for a in found:
-        if a.security_id != out.security_id or a.account_id == out.account_id:
+    for account_id, (txs, snaps) in by_account.items():
+        if account_id == out.account_id or (account_id, out.security_id) in consumed:
             continue
-        if (a.account_id, a.security_id) in consumed or a.last_date < earliest:
+        a = _arrival(out, account_id, txs, snaps)
+        if a is None:
             continue
         res.append(
             Candidate(
                 arrival=a,
                 quantity_match=abs(a.quantity - out.quantity) <= QTY_EPSILON,
                 cost_match=_cost_match(out.carried_cost, a.avg_cost),
-                early=a.date < earliest,
             )
         )
     res.sort(key=lambda c: (
         not c.quantity_match, c.early, c.cost_match is False, not c.cost_match,
-        abs((c.arrival.date - out.date).days),
+        abs((c.arrival.effective - out.date).days), c.arrival.account_id,
     ))
     return res
 
@@ -391,15 +451,15 @@ def pick_automatically(out: TransferOut, cands: Sequence[Candidate]) -> Candidat
     pool = [
         c for c in cands
         if c.quantity_match and not c.early and c.cost_match is not False
-        and c.arrival.kind != "buy"
-        and (c.arrival.date - out.date).days <= WINDOW_DAYS
+        and c.arrival.kind in ("snapshot", "transfer_in")
+        and (c.arrival.effective - out.date).days <= WINDOW_DAYS
     ]
     if not pool:
         return None
     confirmed = [c for c in pool if c.cost_match]
     pool = confirmed or pool
-    first = min(c.arrival.date for c in pool)
-    firsts = [c for c in pool if c.arrival.date == first]
+    first = min(c.arrival.effective for c in pool)
+    firsts = [c for c in pool if c.arrival.effective == first]
     return firsts[0] if len(firsts) == 1 else None
 
 
@@ -426,7 +486,12 @@ def resolve(
         ledger_transfer_outs(transactions) + snapshot_transfer_outs(snapshots, transactions),
         key=lambda o: (o.date, o.security_id, o.account_id),
     )
-    found = arrivals(transactions, snapshots)
+    groups: dict[int, dict[int, tuple[list[Transaction], list[HoldingSnapshot]]]] = {}
+    for t in transactions:
+        if t.security_id is not None:
+            groups.setdefault(t.security_id, {}).setdefault(t.account_id, ([], []))[0].append(t)
+    for sn in snapshots:
+        groups.setdefault(sn.security_id, {}).setdefault(sn.account_id, ([], []))[1].append(sn)
     res = Resolution()
     consumed: set[tuple[int, int]] = set()
     seen: set[tuple[int, int, date]] = set()
@@ -434,6 +499,18 @@ def resolve(
     for m in decisions:
         if m.to_account_id is not None:
             consumed.add((m.to_account_id, m.security_id))
+            # 選んだ口座の入庫のうち、この移管が届いたものとして数えられるもの
+            # （数量がちょうど合うときだけ。合わなければどれか決められない）
+            txs, snaps = groups.get(m.security_id, {}).get(m.to_account_id, ([], []))
+            probe = TransferOut(m.security_id, m.from_account_id, m.date, m.quantity,
+                                "manual", None, True)
+            arrived = _arrival(probe, m.to_account_id, txs, snaps)
+            absorbed = (
+                arrived.absorbed
+                if arrived is not None and arrived.kind == "transfer_in"
+                and abs(arrived.quantity - m.quantity) <= QTY_EPSILON
+                else ()
+            )
             res.links.append(
                 TransferLink(
                     security_id=m.security_id,
@@ -444,20 +521,22 @@ def resolve(
                     origin="manual",
                     source="manual",
                     manual_id=m.id,
+                    absorbed=absorbed,
                 )
             )
 
     for out in outs:
         seen.add(out.key)
         m = by_key.get(out.key)
+        by_account = groups.get(out.security_id, {})
         if m is not None:
             # 付け替えの候補には、この判断で結び付けた口座も残す
             taken = consumed - {(m.to_account_id, out.security_id)}
-            res.candidates[out.key] = candidates(out, found, taken)
+            res.candidates[out.key] = candidates(out, by_account, taken)
             if m.to_account_id is None:
                 res.dismissed.append((out, m))
             continue
-        cands = candidates(out, found, consumed)
+        cands = candidates(out, by_account, consumed)
         res.candidates[out.key] = cands
         chosen = pick_automatically(out, cands)
         if chosen is not None:
@@ -472,6 +551,7 @@ def resolve(
                     origin="auto",
                     source=out.source,
                     cost_match=chosen.cost_match,
+                    absorbed=chosen.arrival.absorbed,
                 )
             )
         elif out.source == "ledger" and (out.closed or any(c.quantity_match for c in cands)):

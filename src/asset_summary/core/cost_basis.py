@@ -801,7 +801,8 @@ def quantity_paths(
 
     links（口座間の移管。core/transfers.py）の移管先は、最初のスナップショット
     より前を「移管の日から移ってきた数量、それより前は持っていない」で描く。
-    移管先に自前の取引履歴があれば、そこに無い移管だけを仮の入庫として足す。
+    移管先の取引履歴のうち移管が届いたものとして数えた入庫（link.absorbed。元の
+    取得日の日付で記録された入庫など）は外し、移管の日の仮の入庫に置き換える。
 
     スナップショットの無い口座×銘柄（売り切った・移管した、今は持っていない
     保有）は、今は 0 という事実を錨に取引履歴だけで全期間を描く。
@@ -817,14 +818,19 @@ def quantity_paths(
     snaps_by_group: dict[tuple[int, int], list[HoldingSnapshot]] = {}
     for s in snapshots:
         snaps_by_group.setdefault((s.account_id, s.security_id), []).append(s)
+    absorbed = {k for link in links for k in link.absorbed}
     txs_by_group: dict[tuple[int, int], list[Transaction]] = {}
     for tx in transactions:
         if tx.security_id is None or _quantity_step(tx) is None:
             continue
+        if absorbed and _tx_key(tx) in absorbed:
+            continue    # 移管の日の仮の入庫として数える
         txs_by_group.setdefault((tx.account_id, tx.security_id), []).append(tx)
     links_into: dict[tuple[int, int], list[TransferLink]] = {}
+    links_out: dict[tuple[int, int], list[TransferLink]] = {}
     for link in links:
         links_into.setdefault((link.to_account_id, link.security_id), []).append(link)
+        links_out.setdefault((link.from_account_id, link.security_id), []).append(link)
 
     out: dict[tuple[int, int], QuantityPath] = {}
     for key, snaps in snaps_by_group.items():
@@ -835,13 +841,23 @@ def quantity_paths(
         path, _status = _group_quantity_path(snaps, _ordered(txs), incoming)
         if path is not None:
             out[key] = path
-    for key, txs in txs_by_group.items():
-        if key in snaps_by_group:
-            continue
+    # スナップショットの無い口座×銘柄。移管で経由しただけの口座（記録の無い
+    # 口座を手動で結び付けた場合）は、出入りを仮の入庫・出庫で補う
+    for key in (set(txs_by_group) | set(links_into)) - set(snaps_by_group):
+        txs = list(txs_by_group.get(key, []))
+        txs += [_virtual_transfer(link, TxType.TRANSFER_IN) for link in links_into.get(key, [])
+                if not _has_transfer(txs, link, TxType.TRANSFER_IN)]
+        txs += [_virtual_transfer(link, TxType.TRANSFER_OUT) for link in links_out.get(key, [])
+                if not _has_transfer(txs, link, TxType.TRANSFER_OUT)]
         path = _closed_group_path(_ordered(txs))
         if path is not None:
             out[key] = path
     return out
+
+
+def _tx_key(t: Transaction) -> tuple[str, int]:
+    """取引の同一性（transfers.tx_key と同じ。循環 import を避けて複製）。"""
+    return ("id", t.id) if t.id is not None else ("obj", id(t))
 
 
 def _closed_group_path(txs: list[Transaction]) -> QuantityPath | None:
@@ -864,15 +880,16 @@ def _closed_group_path(txs: list[Transaction]) -> QuantityPath | None:
     return QuantityPath(before=date.max, changes=tuple(changes), opening=q)
 
 
-def _transfer_in(link: "TransferLink") -> Transaction:
-    """移管を移管先の仮の入庫にする（台帳には書かない。推移の計算用）。"""
+def _virtual_transfer(link: "TransferLink", tx_type: TxType) -> Transaction:
+    """移管を仮の入庫（移管先）・出庫（移管元）にする。台帳には書かない（推移の計算用）。"""
+    incoming = tx_type is TxType.TRANSFER_IN
     return Transaction(
         dedup_key=f"transfer:{link.from_account_id}:{link.date.isoformat()}",
-        account_id=link.to_account_id,
+        account_id=link.to_account_id if incoming else link.from_account_id,
         security_id=link.security_id,
         trade_date=link.date,
-        tx_type=TxType.TRANSFER_IN,
-        quantity=link.quantity,
+        tx_type=tx_type,
+        quantity=link.quantity if incoming else -link.quantity,
         origin="transfer",
     )
 
@@ -910,13 +927,14 @@ def _linked_path(
     return (QuantityPath(before=first, changes=tuple(changes), opening=opening), "linked")
 
 
-def _has_transfer_in(txs: Sequence[Transaction], link: "TransferLink") -> bool:
+def _has_transfer(txs: Sequence[Transaction], link: "TransferLink", tx_type: TxType) -> bool:
+    """移管の日の前後（7 日前〜30 日後）にその向きの移動の記録が取引履歴にあるか。
+
+    数量は比べない — 移管元は貸株の出し入れと移管の出庫が同じ日に何行にも分かれて
+    いることがあり、1 行ずつでは移管の数量にならない。
+    """
     lo, hi = link.date - timedelta(days=7), link.date + timedelta(days=30)
-    return any(
-        t.tx_type is TxType.TRANSFER_IN and lo <= t.trade_date <= hi
-        and abs(_abs(t.quantity) - link.quantity) <= QTY_EPSILON
-        for t in txs
-    )
+    return any(t.tx_type is tx_type and lo <= t.trade_date <= hi for t in txs)
 
 
 def quantity_path_status(
@@ -968,11 +986,11 @@ def _group_quantity_path(
                 ZERO,
             )
             return _linked_path(held, first, incoming)
-        # 自前の取引履歴がある移管先。移管先の証券会社は入庫を記録するので、
-        # 同じ数量の入庫が近くに無い移管だけを仮の入庫として足す
+        # 自前の取引履歴がある移管先。移管が届いた入庫は呼び出し側で外してあるので、
+        # 移管の日に入庫が残っていない移管だけを仮の入庫として足す
         extra = [
-            _transfer_in(link) for link in incoming
-            if link.date < first and not _has_transfer_in(txs, link)
+            _virtual_transfer(link, TxType.TRANSFER_IN) for link in incoming
+            if link.date < first and not _has_transfer(txs, link, TxType.TRANSFER_IN)
         ]
         if extra:
             txs = _ordered([*txs, *extra])
