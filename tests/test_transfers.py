@@ -565,3 +565,27 @@ def test_history_explains_what_the_destination_holds_beyond_the_transfer(client,
         assert pts[day]["quantity"] == want, day
     assert not any(p["backfilled"] for p in data["points"])
     assert data["transfer_remainders"] == []
+
+
+def test_an_undecided_transfer_is_not_offered_as_a_purchase(client, bought_more):
+    """移管先を決めていないうちは、移管先の最初の記録を買付として登録するよう勧めない
+    （移管が届いたものかもしれない）。移管ではないと決めたら、買ったものとして勧める。"""
+    ids = bought_more
+
+    def carried_back():
+        return client.get(
+            "/api/portfolio-history",
+            params={"range": "all", "scope": f"security:{ids['sec']}"},
+        ).json()["carried_back"]
+
+    assert carried_back() == []                     # C は決まっていない移管の候補
+    assert _link_b_to_c(client, ids).status_code == 200
+    assert carried_back() == []                     # 移管先（残りは transfer_remainders で断る）
+    res = client.post("/api/transfers", json={
+        "security_id": ids["sec"], "from_account_id": ids["b"], "date": "2026-07-16",
+        "quantity": "100", "to_account_id": None,
+    })
+    assert res.status_code == 200
+    (row,) = carried_back()
+    assert (row["account"], row["quantity"], row["until"], row["unit_price"]) == (
+        "C証券", "200", "2026-08-04", "935")

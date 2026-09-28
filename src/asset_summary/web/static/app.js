@@ -2569,7 +2569,19 @@ async function renderSecurityHistory() {
     // 遡及した区間（破線）が範囲に入っているときだけ、どこから記録かを断る
     const recorded = points.find((p) => !p.backfilled);
     if (points.length && points[0].backfilled && recorded) {
-      notes.push(escapeHtml(t("label.quantityBackfilled", { date: recorded.t })));
+      let text = escapeHtml(t("label.quantityBackfilled", { date: recorded.t }));
+      // 遡って描いている口座ごとに、その保有を買った取引の登録へ（数量などを入れて開く）
+      const regs = (data && data.carried_back) || [];
+      if (regs.length) {
+        text += " " + escapeHtml(t("label.backfillRegister")) + " " + regs.map((r) =>
+          `<a href="${escapeHtml(_manualTxHash({
+            security: _secDetailId, account: r.account_id, quantity: r.quantity,
+            price: r.unit_price, date: r.acquired_on, until: r.until,
+          }))}">${escapeHtml(t("label.backfillRegisterLink", {
+            account: r.account, qty: fmtAmount(r.quantity, _secQtyDigits),
+          }))}</a>`).join("・");
+      }
+      notes.push(text);
     }
   } else if (data) {
     notes.push(..._historyNotes(data));
@@ -2588,7 +2600,9 @@ async function renderSecurityHistory() {
   // 移管先の最初の記録が、移ってきた数量より多い（残りは移管より前から持っていた扱い）。
   // 移管の後に買い足した分なら、取引に登録すれば買った日から数えられる
   ((data && data.transfer_remainders) || []).forEach((r) => {
-    const register = "#" + buildHash("manage", "tx", { security: _secDetailId, account: r.account_id });
+    const register = _manualTxHash({
+      security: _secDetailId, account: r.account_id, quantity: r.quantity, until: r.first_date,
+    });
     notes.push(escapeHtml(t("label.transferRemainder", {
       account: r.account, date: r.first_date, qty: fmtAmount(r.quantity, _secQtyDigits),
     })) + ` <a href="${escapeHtml(register)}">${escapeHtml(t("label.transferRemainderLink"))}</a>`);
@@ -4020,7 +4034,8 @@ async function loadManagePage(sub, params = {}) {
   renderSecuritiesTable();
   _syncSecuritySelects();
   _syncManualTxSelects();
-  if (tabKey === "tx") _prefillManualTx(params);
+  // 銘柄詳細から来たときだけ値を入れる（それ以外で開いたら前の案内を消す）
+  _prefillManualTx(tabKey === "tx" ? params : {});
   loadManageHoldings();
   loadManualTransactions();
   loadManageClassLists();
@@ -4655,8 +4670,23 @@ function _syncManualTxSelects() {
   if ([...secSel.options].some((o) => o.value === prevSec)) secSel.value = prevSec;
 }
 
-/** 銘柄詳細（移管先の買い足しの断り）から来たとき、その口座・銘柄の買付を選んだ状態にする。 */
+/**
+ * 手動登録の取引タブを、登録に要る値を入れた状態で開くリンク（銘柄詳細の注記から）。
+ * security・account・quantity・price・date（約定日の見当）・until（記録の始まる日。
+ * 約定日はこれより前）。値の無いものは付けない。
+ */
+function _manualTxHash(params) {
+  return "#" + buildHash("manage", "tx", params);
+}
+
+/**
+ * 銘柄詳細（破線の注記・移管先の残りの断り）から来たとき、登録に要る値を入れておく。
+ * 口座・銘柄・買付に、遡って描いている数量・単価（取込の平均取得単価など）・約定日
+ * （取込の取得日）が分かっていれば入れ、どこから来た値かを添える。
+ */
 function _prefillManualTx(params) {
+  const box = document.getElementById("mtx-prefill");
+  box.classList.add("hidden");
   const pick = (id, value) => {
     const sel = document.getElementById(id);
     if (value != null && [...sel.options].some((o) => o.value === String(value))) {
@@ -4666,7 +4696,26 @@ function _prefillManualTx(params) {
     return false;
   };
   const picked = [pick("mtx-account", params.account), pick("mtx-security", params.security)];
-  if (picked.some(Boolean)) document.getElementById("mtx-type").value = "buy";
+  if (!picked.some(Boolean)) return;
+  document.getElementById("mtx-type").value = "buy";
+  if (!params.until) return;
+  // 記録より前の買付。約定日が分からなければ空けて入れてもらう（今日のままだと記録の後になる）
+  document.getElementById("mtx-date").value = params.date || "";
+  document.getElementById("mtx-quantity").value = params.quantity || "";
+  document.getElementById("mtx-price").value = params.price || "";
+  document.getElementById("mtx-fee").value = "";
+  hideResult("mtx-result");
+  const sec = _securities.find((s) => String(s.id) === String(params.security)) || {};
+  const acct = document.getElementById("mtx-account");
+  const parts = [t("manage.txPrefill", {
+    name: sec.name || "", account: acct.options[acct.selectedIndex].textContent,
+    until: params.until, qty: fmtAmount(params.quantity, qtyDigits(sec.asset_class)),
+  })];
+  parts.push(t(params.date ? "manage.txPrefillDate" : "manage.txPrefillNoDate"));
+  if (params.price) parts.push(t("manage.txPrefillPrice"));
+  parts.push(t("manage.txPrefillSplit"));
+  box.textContent = parts.join(" ");
+  box.classList.remove("hidden");
 }
 
 // ---- 口座間の移管 ----
@@ -5056,6 +5105,7 @@ document.getElementById("mtx-save").addEventListener("click", async () => {
       }));
     }
     showResult("mtx-result", true, parts.join(" "));
+    document.getElementById("mtx-prefill").classList.add("hidden");
     document.getElementById("mtx-result").classList.toggle(
       "warn", !["traced", "closed", "no_earlier_trades"].includes(d.chart_status));
     // 続けて同じ口座・銘柄の別の日を入れやすいよう、数量・単価・手数料だけ空ける

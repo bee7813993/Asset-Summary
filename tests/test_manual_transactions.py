@@ -234,3 +234,56 @@ def _insert_imported(store, acct_id, sec_id) -> int:
     )
     return next(t.id for t in store.list_transactions(security_id=sec_id)
                 if t.origin != "manual")
+
+
+# ----------------------------------------------------------------------
+# 銘柄詳細の破線（遡って描いている数量）から、登録に要る値を取引タブへ渡す
+# ----------------------------------------------------------------------
+
+
+def _carried_back(client, sec_id):
+    return client.get(
+        "/api/portfolio-history", params={"range": "all", "scope": f"security:{sec_id}"}
+    ).json()["carried_back"]
+
+
+def test_history_names_what_it_carries_back_so_it_can_be_registered(client, store, fund):
+    """最初の記録より前の取引が無い口座は、最初の記録の数量をそのまま遡って描く（破線）。
+    その数量・平均取得単価・取込の取得日を、取引の登録に入れておけるよう返す。"""
+    acct_id, sec_id = fund
+    store.upsert_snapshot(
+        HoldingSnapshot(account_id=acct_id, security_id=sec_id, as_of_date=date(2026, 8, 4),
+                        quantity=D("350000"), avg_cost=D("18000"), origin="mf",
+                        raw={"meta": {"acquired_on": "2022/05/10"}})
+    )
+    assert _carried_back(client, sec_id) == [{
+        "account_id": acct_id, "account": "SMBC日興証券", "quantity": "350000",
+        "until": "2026-08-04", "unit_price": "18000", "acquired_on": "2022-05-10",
+    }]
+    # 入れておいた値のまま登録すると、遡りが消える
+    res = _post(client, acct_id, sec_id, trade_date="2022-05-10", quantity="350000",
+                unit_price="18000")
+    assert res.json()["chart_status"] == "traced"
+    assert _carried_back(client, sec_id) == []
+
+
+def test_a_partly_covered_holding_offers_the_part_before_its_history(client, fund):
+    """取引履歴が一部だけなら、その前から持っていた分（期首）を、取引履歴の最初の日より
+    前の買付として。単価は取得原価の「取得日不明」分の単価（平均取得単価から逆算）。"""
+    acct_id, sec_id = fund
+    _post(client, acct_id, sec_id, trade_date="2023-03-15", quantity="100000", unit_price="17000")
+    (row,) = _carried_back(client, sec_id)
+    # (35万口 × 18,000 − 10万口 × 17,000) ÷ 25万口 = 18,400（1万口あたり）
+    assert (row["quantity"], row["until"], row["unit_price"], row["acquired_on"]) == (
+        "250000", "2023-03-15", "18400", None)
+
+
+def test_lots_that_start_on_different_days_are_not_offered(client, store, fund):
+    """ロットごとに記録の始まる日が違う口座は、取引を足しても遡りが消えないので案内しない。"""
+    acct_id, sec_id = fund
+    store.upsert_snapshot(
+        HoldingSnapshot(account_id=acct_id, security_id=sec_id, lot_seq=1,
+                        as_of_date=date(2026, 9, 1), quantity=D("50000"),
+                        avg_cost=D("30000"), origin="mf")
+    )
+    assert _carried_back(client, sec_id) == []

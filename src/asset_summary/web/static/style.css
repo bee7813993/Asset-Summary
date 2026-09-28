@@ -440,6 +440,12 @@ tr.transfer-focus td { background: color-mix(in srgb, var(--accent) 12%, transpa
 /* 銘柄詳細の移管のカード（移管タブへのリンク・判断のあとの取り消し） */
 .transfer-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 10px; font-size: 13px; }
 #sec-transfer-undo:empty { display: none; }
+/* 銘柄詳細から取引タブへ来たとき、入れておいた値がどこから来たかの案内 */
+.mtx-prefill {
+  font-size: 13px; color: var(--text); margin: -4px 0 14px; padding: 8px 12px;
+  border-left: 3px solid var(--accent); border-radius: 6px;
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
 .transfer-foot a { color: var(--accent); text-decoration: none; }
 .transfer-foot a:hover { text-decoration: underline; }
 /* 「移管ではない」「取り消す」は候補と並ぶ選択肢。行内の削除ボタンのように薄くしない

@@ -433,6 +433,90 @@ def _mf_acquired_on(lot: HoldingSnapshot) -> str | None:
     return parsed.isoformat() if parsed else None
 
 
+def _price_hint(value: Decimal | None) -> str | None:
+    """取引の登録に入れておく単価（小数 4 桁まで。末尾の 0 は落とす）。"""
+    if value is None or value <= 0:
+        return None
+    text = format(value.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP), "f")
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+# 売買という形を取らない資産（残高・記載評価額で持つ）。取引の登録を案内しない
+_NO_TRADE_CLASSES = {AssetClass.CASH, AssetClass.POINT, AssetClass.PENSION, AssetClass.REAL_ESTATE}
+
+
+def _carried_back(
+    sec: Any,
+    snaps: list[HoldingSnapshot],
+    txs: list[Any],
+    paths: dict[tuple[int, int], Any],
+    skip: set[tuple[int, int]],
+    basis_rows: list[dict[str, Any]],
+    accounts: dict[int, Any],
+) -> list[dict[str, Any]]:
+    """1銘柄の保有数の推移で、記録ではなく遡って描いている数量（破線）を口座ごとに。
+
+    その保有を買った取引を登録すれば、買った日から描ける。銘柄詳細の注記から
+    取引タブをこの値（数量・単価・約定日の見当）を入れた状態で開くためのもの。
+    - 取引履歴でさかのぼれる口座×銘柄は、取引履歴より前から持っていた分（期首）。
+      取引履歴の最初の日より前の買付になる。単価は取得原価の「取得日不明」分の単価
+    - 最初の記録より前の取引が無い口座×銘柄は、最初の記録の数量をそのまま遡っている。
+      単価はその記録の平均取得単価
+    約定日は、取込（MF）の取得日がその日より前なら入れる。取引を足しても遡りが
+    消えない口座×銘柄（ロットごとに記録の始まる日が違う・取引履歴が記録と合わない）と、
+    移管先（残りは transfer_remainders で別に断る）は出さない。
+    """
+    if sec is None or sec.asset_class in _NO_TRADE_CLASSES:
+        return []
+    by_group: dict[tuple[int, int], list[HoldingSnapshot]] = {}
+    for s in snaps:
+        by_group.setdefault((s.account_id, s.security_id), []).append(s)
+    residual_cost = {b["account_id"]: b.get("residual_avg_cost") for b in basis_rows}
+    out: list[dict[str, Any]] = []
+    for key in sorted(set(by_group) | set(paths)):
+        if key in skip:
+            continue
+        group = by_group.get(key, [])
+        first = min((s.as_of_date for s in group), default=None)
+        firsts = [s for s in group if s.as_of_date == first]
+        path = paths.get(key)
+        if path is not None:
+            if path.opening <= ZERO:
+                continue
+            quantity = path.opening
+            until = path.changes[0][0] if path.changes else path.before
+            price = _to_dec_or_zero(residual_cost.get(key[0])) or None
+        else:
+            status = cost_basis.quantity_path_status(txs, snaps, key[0], key[1])
+            if status not in ("no_trades", "no_earlier_trades"):
+                continue
+            starts: dict[int, date] = {}
+            for s in group:
+                starts[s.lot_seq] = min(starts.get(s.lot_seq, s.as_of_date), s.as_of_date)
+            if len(set(starts.values())) != 1:
+                continue        # ロットごとに記録の始まる日が違う（取引を足しても遡る）
+            quantity = sum((s.quantity for s in firsts), ZERO)
+            if quantity <= ZERO:
+                continue
+            until = first
+            price = None
+            if all(s.avg_cost is not None for s in firsts):
+                price = sum((s.quantity * s.avg_cost for s in firsts), ZERO) / quantity
+        acquired = {_mf_acquired_on(s) for s in firsts}
+        acquired_on = acquired.pop() if len(acquired) == 1 else None
+        if acquired_on is not None and acquired_on >= until.isoformat():
+            acquired_on = None
+        out.append({
+            "account_id": key[0],
+            "account": _acct_display(accounts.get(key[0])),
+            "quantity": _s(quantity),
+            "until": until.isoformat(),
+            "unit_price": _price_hint(price),
+            "acquired_on": acquired_on,
+        })
+    return out
+
+
 def _ser_transaction(tx: Any, accounts: dict[int, Any]) -> dict[str, Any]:
     account = accounts.get(tx.account_id)
     return {
@@ -1786,12 +1870,14 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
         quantity_paths = None
         transfer_links: list[Any] = []
         transfer_remainders: list[dict[str, Any]] = []
+        carried_back: list[dict[str, Any]] = []
         if scope_t is not None and scope_t[0] == "security":
             sid = int(scope_t[1])
             sec_snaps = [s for s in snapshots if s.security_id == sid]
-            transfer_links = transfers.resolve(
+            moves = transfers.resolve(
                 scope_txs, sec_snaps, store.list_transfer_links(security_id=sid)
-            ).links
+            )
+            transfer_links = moves.links
             quantity_paths = cost_basis.quantity_paths(
                 scope_txs, sec_snaps, transfer_links
             ) or None
@@ -1808,6 +1894,17 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
                     "quantity": _s(path.opening),
                     "first_date": path.before.isoformat(),
                 })
+            # 遡って描いている数量（破線）。買付を取引に登録すれば買った日から描ける。
+            # 移管先（残りは上で断る）と、決まっていない移管の候補の口座（その記録は
+            # 移管が届いたものかもしれない。先に移管を決める）には案内しない
+            not_bought = {(link.to_account_id, link.security_id) for link in transfer_links}
+            not_bought |= {
+                (c.arrival.account_id, sid) for _out, cands in moves.unresolved for c in cands
+            }
+            carried_back = _carried_back(
+                secs.get(sid), sec_snaps, scope_txs, quantity_paths or {}, not_bought,
+                store.list_cost_basis(security_id=sid), accounts,
+            )
 
         points = daily_series(
             snapshots,
@@ -1909,6 +2006,7 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
                 _ser_transfer_link(link, accounts, secs) for link in transfer_links
             ],
             "transfer_remainders": transfer_remainders,
+            "carried_back": carried_back,
             "unpriced": sorted(unpriced_names),
             "needs_valuation": sorted(needs_valuation),
             "is_partial": bool(unpriced_names) or cs_is_partial,
