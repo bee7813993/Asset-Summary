@@ -610,6 +610,20 @@
             <div id="sec-history-note" class="history-unpriced hidden"></div>
           </section>
 
+          <!-- 移管先を自動では決められなかった移管元（移管タブと同じ候補から、ここでも選べる） -->
+          <section id="sec-transfer-card" class="card hidden">
+            <h2 id="sec-transfer-title" data-i18n="manage.trUnresolvedTitle">移管先を選んでください</h2>
+            <div id="sec-transfer-body">
+              <p class="card-hint" data-i18n="label.secTransferHint">この銘柄を別の証券会社へ移した記録のうち、移管先を自動では決められなかったものです。移管先を選ぶと、推移グラフが移管の前後で1本の線になります。</p>
+              <div id="sec-transfer-list" class="transfer-list"></div>
+            </div>
+            <div id="sec-transfer-result" class="settings-result hidden"></div>
+            <div class="transfer-foot">
+              <span id="sec-transfer-undo"></span>
+              <a id="sec-transfer-open" href="#manage/transfers" data-i18n="label.secTransferOpen">移管タブで見る</a>
+            </div>
+          </section>
+
           <div class="stat-tiles">
             <div class="stat-tile"><div class="stat-label" data-i18n="th.quantity">数量</div><div class="stat-value" id="tile-quantity">—</div></div>
             <div class="stat-tile"><div class="stat-label" data-i18n="th.avgCost">平均取得単価</div><div class="stat-value" id="tile-avg-cost">—</div></div>

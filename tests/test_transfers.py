@@ -468,3 +468,100 @@ def test_security_history_counts_backdated_transfer_ins_once(client, store, move
     assert (move["from_account"], move["to_account"]) == ("A証券", "B証券")
     listed = client.get("/api/transfers").json()
     assert [c["backdated"] for c in listed["links"][0]["candidates"]] == [True]
+
+
+@pytest.fixture()
+def bought_more(store, moved):
+    """A → B（取得日の日付で入庫）→ C。C は取引履歴が無く、最初の記録（2026-08-04）で
+    移ってきた 100 より多い 200 を持つ（移管の後に C で買い足した）。"""
+    sec_id = store.create_security(
+        Security(name="架空商事", name_key="かくうしょうじ", code="9980",
+                 asset_class=AssetClass.STOCK_JP, unit=Unit.SHARE,
+                 price_source_type=PriceSourceType.YAHOO, price_source_ref="9980.T",
+                 price_source_status=PriceSourceStatus.LINKED)
+    )
+    rows = [
+        (moved["a"], "2020-05-01", TxType.BUY, "100"),
+        (moved["a"], "2025-12-23", TxType.TRANSFER_OUT, "100"),
+        (moved["a"], "2025-12-23", TxType.TRANSFER_IN, "100"),         # 貸株の戻し
+        (moved["a"], "2025-12-23", TxType.TRANSFER_OUT, "100"),
+        (moved["b"], "2020-05-01", TxType.TRANSFER_IN, "100"),         # 取得日の日付
+        (moved["b"], "2026-07-16", TxType.TRANSFER_OUT, "100"),
+    ]
+    store.create_batch(ImportBatch(id="ledger-shoji", source_kind="broker_csv"))
+    store.insert_transactions(
+        [
+            Transaction(dedup_key=f"s{i}", account_id=acct, security_id=sec_id,
+                        trade_date=date.fromisoformat(day), tx_type=tx_type,
+                        quantity=D(qty), unit_price=D("971"))
+            for i, (acct, day, tx_type, qty) in enumerate(rows)
+        ],
+        batch_id="ledger-shoji",
+    )
+    store.upsert_snapshot(
+        HoldingSnapshot(account_id=moved["c"], security_id=sec_id, as_of_date=date(2026, 8, 4),
+                        quantity=D("200"), avg_cost=D("935"), origin="mf")
+    )
+    for day, px in (("2020-05-01", "971"), ("2026-08-03", "960")):
+        store.upsert_daily_price("yahoo", "9980.T", day, D(px), "JPY")
+    return {**moved, "sec": sec_id}
+
+
+def _link_b_to_c(client, ids):
+    return client.post("/api/transfers", json={
+        "security_id": ids["sec"], "from_account_id": ids["b"], "date": "2026-07-16",
+        "quantity": "100", "to_account_id": ids["c"],
+    })
+
+
+def test_security_detail_offers_the_undecided_transfer(client, bought_more):
+    """移管先を自動で決められなかった移管元は、銘柄詳細にも候補付きで出る（その場で選べる）。"""
+    ids = bought_more
+    detail = client.get(f"/api/security/{ids['sec']}").json()
+    (row,) = detail["transfer_unresolved"]
+    assert (row["from_account"], row["date"], row["quantity"], row["source"]) == (
+        "B証券", "2026-07-16", "100", "ledger")
+    (cand,) = row["candidates"]
+    assert (cand["account"], cand["quantity"], cand["quantity_match"], cand["cost_match"]) == (
+        "C証券", "200", False, False)
+    # 移管タブ（全銘柄）の同じ出来事と同じ形
+    listed = client.get("/api/transfers").json()["unresolved"]
+    assert [r for r in listed if r["security_id"] == ids["sec"]] == [row]
+
+    assert _link_b_to_c(client, ids).status_code == 200
+    assert client.get(f"/api/security/{ids['sec']}").json()["transfer_unresolved"] == []
+
+
+def test_history_explains_what_the_destination_holds_beyond_the_transfer(client, bought_more):
+    """移管先が移ってきた数量より多く持っていれば、残りは移管前から持っていた扱い（破線）で、
+    そのことを知らせる。移管の後の買付を登録すると、その日から数える。"""
+    ids = bought_more
+
+    def history():
+        data = client.get(
+            "/api/portfolio-history",
+            params={"range": "all", "scope": f"security:{ids['sec']}"},
+        ).json()
+        return data, {p["t"]: p for p in data["points"]}
+
+    assert _link_b_to_c(client, ids).status_code == 200
+    data, pts = history()
+    assert (pts["2026-07-15"]["quantity"], pts["2026-07-15"]["backfilled"]) == ("200", True)
+    assert (pts["2026-07-16"]["quantity"], pts["2026-07-16"]["backfilled"]) == ("200", False)
+    assert data["transfer_remainders"] == [{
+        "account_id": ids["c"], "account": "C証券", "quantity": "100",
+        "first_date": "2026-08-04",
+    }]
+
+    # C は取引履歴をダウンロードできないので、買い足した分を手動で登録する
+    res = client.post("/api/transactions", json={
+        "account_id": ids["c"], "security_id": ids["sec"], "trade_date": "2026-07-25",
+        "tx_type": "buy", "quantity": "100", "unit_price": "899",
+    })
+    assert res.status_code == 200
+    data, pts = history()
+    for day, want in (("2020-05-01", "100"), ("2025-12-23", "100"), ("2026-07-16", "100"),
+                      ("2026-07-24", "100"), ("2026-07-25", "200"), ("2026-08-04", "200")):
+        assert pts[day]["quantity"] == want, day
+    assert not any(p["backfilled"] for p in data["points"])
+    assert data["transfer_remainders"] == []

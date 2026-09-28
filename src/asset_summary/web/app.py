@@ -1785,6 +1785,7 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
         # 取引履歴と、移管先の最初の記録より前がこれで1本の線になる
         quantity_paths = None
         transfer_links: list[Any] = []
+        transfer_remainders: list[dict[str, Any]] = []
         if scope_t is not None and scope_t[0] == "security":
             sid = int(scope_t[1])
             sec_snaps = [s for s in snapshots if s.security_id == sid]
@@ -1794,6 +1795,19 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
             quantity_paths = cost_basis.quantity_paths(
                 scope_txs, sec_snaps, transfer_links
             ) or None
+            # 移管先の最初の記録が、移ってきた数量より多い。残りはいつからあったか
+            # 判らないので、移管より前から持っていた分として遡って描く（破線）。
+            # 移管の後に買い足した分なら、その買付を取引に登録すれば直ると知らせる
+            for key in sorted({(link.to_account_id, link.security_id) for link in transfer_links}):
+                path = (quantity_paths or {}).get(key)
+                if path is None or path.before == date.max or path.opening <= ZERO:
+                    continue
+                transfer_remainders.append({
+                    "account_id": key[0],
+                    "account": _acct_display(accounts.get(key[0])),
+                    "quantity": _s(path.opening),
+                    "first_date": path.before.isoformat(),
+                })
 
         points = daily_series(
             snapshots,
@@ -1894,6 +1908,7 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
             "transfers": [
                 _ser_transfer_link(link, accounts, secs) for link in transfer_links
             ],
+            "transfer_remainders": transfer_remainders,
             "unpriced": sorted(unpriced_names),
             "needs_valuation": sorted(needs_valuation),
             "is_partial": bool(unpriced_names) or cs_is_partial,
@@ -1966,12 +1981,13 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
 
         # 移管で出ていった口座（今は持っていない）には移管先を添える。取得原価の
         # カードで、その口座の履歴が「いまの保有を説明している」と読めないように
-        moved_out: dict[int, Any] = {}
-        for link in transfers.resolve(
+        moves = transfers.resolve(
             store.list_transactions(security_id=security_id),
             [s for s in store.all_snapshots() if s.security_id == security_id],
             store.list_transfer_links(security_id=security_id),
-        ).links:
+        )
+        moved_out: dict[int, Any] = {}
+        for link in moves.links:
             if link.from_account_id not in moved_out or link.date > moved_out[link.from_account_id].date:
                 moved_out[link.from_account_id] = link
         cost_basis = []
@@ -2040,6 +2056,15 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
             "cost_basis": cost_basis,
             "lot_events": cost_basis_events(store, security_id) if tx_count else [],
             "transaction_count": tx_count,
+            # 自動では移管先を決められなかった移管元。銘柄詳細からも選べるように、
+            # 移管タブ（/api/transfers の unresolved）と同じ形で返す
+            "transfer_unresolved": [
+                {
+                    **_ser_transfer_out(out, accounts, {security_id: sec}),
+                    "candidates": [_ser_transfer_candidate(c, accounts) for c in cands],
+                }
+                for out, cands in moves.unresolved
+            ],
             "price_history": price_history,
             "warnings": warnings,
             "generated_at": _utcnow_iso(),
