@@ -278,6 +278,22 @@ CREATE TABLE IF NOT EXISTS holding_cost_basis (
 );
 CREATE INDEX IF NOT EXISTS idx_cb_batch ON holding_cost_basis(batch_id);
 
+-- 口座間の移管（証券会社を移した銘柄）について、利用者が決めたこと。
+-- 自動の判定（core/transfers.py）は取引とスナップショットから毎回作り直すので
+-- 保存しない。ここにあるのは自動で決められなかった・誤っていたものへの判断だけ。
+-- 移管元の出来事は (銘柄, 移管元の口座, 日付) で決まる。to_account_id が NULL の
+-- 行は「移管ではない（売却・贈与など）」で、自動でも結び付けない。
+CREATE TABLE IF NOT EXISTS transfer_links (
+    id              INTEGER PRIMARY KEY,
+    security_id     INTEGER NOT NULL REFERENCES securities(id),
+    from_account_id INTEGER NOT NULL REFERENCES accounts(id),
+    to_account_id   INTEGER REFERENCES accounts(id),
+    transfer_date   TEXT NOT NULL,
+    quantity        TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    UNIQUE (security_id, from_account_id, transfer_date)
+);
+
 -- 確定した列対応を見出しの指紋で覚え、次回同じ書式なら自動適用する
 CREATE TABLE IF NOT EXISTS tx_format_profiles (
     id            INTEGER PRIMARY KEY,
@@ -658,6 +674,7 @@ class Store:
             if n:
                 raise ConflictError(f"security {security_id} has {n} holding snapshots")
             conn.execute("DELETE FROM security_aliases WHERE security_id = ?", (security_id,))
+            conn.execute("DELETE FROM transfer_links WHERE security_id = ?", (security_id,))
             conn.execute(
                 "DELETE FROM daily_prices WHERE source IN ('manual','mf_reported') AND source_id = ?",
                 (str(security_id),),
@@ -744,6 +761,12 @@ class Store:
             conn.execute(
                 "DELETE FROM holding_cost_basis WHERE security_id = ?", (source_id,)
             )
+            # 移管の判断も target へ（同じ出来事に target 側の判断があればそちらを残す）
+            conn.execute(
+                "UPDATE OR IGNORE transfer_links SET security_id = ? WHERE security_id = ?",
+                (target_id, source_id),
+            )
+            conn.execute("DELETE FROM transfer_links WHERE security_id = ?", (source_id,))
 
             # --- タグ配分・Myポートフォリオ（target 側の既存設定を優先） ---
             conn.execute(
@@ -1504,6 +1527,66 @@ class Store:
         with self.connect() as conn:
             rows = conn.execute(sql, params).fetchall()
         return [_row_to_transaction(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # 口座間の移管（利用者の判断）
+    # ------------------------------------------------------------------
+
+    def list_transfer_links(self, security_id: int | None = None) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM transfer_links"
+        params: list[Any] = []
+        if security_id is not None:
+            sql += " WHERE security_id = ?"
+            params.append(security_id)
+        sql += " ORDER BY transfer_date, id"
+        with self.connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [
+            {
+                "id": r["id"],
+                "security_id": r["security_id"],
+                "from_account_id": r["from_account_id"],
+                "to_account_id": r["to_account_id"],
+                "transfer_date": date.fromisoformat(r["transfer_date"]),
+                "quantity": Decimal(r["quantity"]),
+            }
+            for r in rows
+        ]
+
+    def set_transfer_link(
+        self,
+        *,
+        security_id: int,
+        from_account_id: int,
+        transfer_date: date,
+        quantity: Decimal,
+        to_account_id: int | None,
+    ) -> int:
+        """移管元の出来事ひとつへの判断を保存する（同じ出来事なら置き換える）。"""
+        with self.connect() as conn:
+            conn.execute(
+                """INSERT INTO transfer_links (security_id, from_account_id, to_account_id,
+                                               transfer_date, quantity, created_at)
+                   VALUES (?,?,?,?,?,?)
+                   ON CONFLICT(security_id, from_account_id, transfer_date)
+                   DO UPDATE SET to_account_id = excluded.to_account_id,
+                                 quantity = excluded.quantity,
+                                 created_at = excluded.created_at""",
+                (security_id, from_account_id, to_account_id, transfer_date.isoformat(),
+                 _d2s(quantity), _utcnow()),
+            )
+            row = conn.execute(
+                """SELECT id FROM transfer_links
+                   WHERE security_id = ? AND from_account_id = ? AND transfer_date = ?""",
+                (security_id, from_account_id, transfer_date.isoformat()),
+            ).fetchone()
+        return int(row["id"])
+
+    def delete_transfer_link(self, link_id: int) -> bool:
+        with self.connect() as conn:
+            return conn.execute(
+                "DELETE FROM transfer_links WHERE id = ?", (link_id,)
+            ).rowcount > 0
 
     def count_transactions(self, **kw: Any) -> int:
         clauses, params = [], []

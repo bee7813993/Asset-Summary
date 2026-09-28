@@ -661,7 +661,7 @@ function router() {
   } else if (page === "import") {
     loadImportPage();
   } else if (page === "manage") {
-    loadManagePage();
+    loadManagePage(sub);
   } else if (page === "settings") {
     loadSettingsPage();
   }
@@ -2572,6 +2572,16 @@ async function renderSecurityHistory() {
   } else if (data) {
     notes.push(..._historyNotes(data));
   }
+  // 口座間の移管でつないだ区間。どの口座からどの口座へかを断り、誤りなら直せるようにする
+  const moves = (data && data.transfers) || [];
+  if (moves.length) {
+    const lines = moves.map((m) => escapeHtml(t("label.transferNote", {
+      from: m.from_account, to: m.to_account, date: m.date,
+      qty: fmtAmount(m.quantity, _secQtyDigits),
+    })) + (m.origin === "auto" ? ` <span class="muted">${escapeHtml(t("tr.autoShort"))}</span>` : ""));
+    notes.push(lines.join("<br>") +
+      ` <a href="#manage/transfers">${escapeHtml(t("label.transferManage"))}</a>`);
+  }
   if (notes.length) {
     note.innerHTML = notes.join("<br>");
     note.classList.remove("hidden");
@@ -3765,9 +3775,14 @@ function renderCostBasisCard(data, secCur, currency) {
   tbody.innerHTML = "";
   groups.forEach((g) => {
     const tr = document.createElement("tr");
+    // 移管で出ていった口座は、履歴の範囲の代わりに移管先を出す（いまは持っていない）
+    const coverageCell = g.transferred_to
+      ? `<span class="chip chip-ok">${escapeHtml(t("tx.transferredChip"))}</span>
+         <span class="muted">${escapeHtml(t("tx.transferredTo", { to: g.transferred_to, date: g.transferred_on }))}</span>`
+      : coverageBadgeHtml(g.coverage);
     tr.innerHTML = `
       <td>${escapeHtml(g.account || "")}</td>
-      <td>${coverageBadgeHtml(g.coverage)}</td>
+      <td>${coverageCell}</td>
       <td class="num">${fmtAmount(g.covered_quantity, _secQtyDigits)}</td>
       <td class="num">${fmtAmount(g.residual_quantity, _secQtyDigits)}</td>
       <td class="num">${fmtPrice(g.residual_avg_cost, secCur)}</td>
@@ -3789,8 +3804,10 @@ function renderCostBasisCard(data, secCur, currency) {
     partial_uncosted: "tx.explainPartialUncosted",
     unreconciled: "tx.explainUnreconciled",
   };
+  // 今は持っていない口座（移管・売却で 0）は、いまの保有を説明していないので外す
+  const held = (g) => Number(g.covered_quantity || 0) + Number(g.residual_quantity || 0) > 0;
   const explains = groups
-    .filter((g) => explainKeys[g.coverage])
+    .filter((g) => explainKeys[g.coverage] && !g.transferred_to && held(g))
     .map((g) => ({
       account: g.account || "",
       text: t(explainKeys[g.coverage], {
@@ -3933,7 +3950,7 @@ document.getElementById("inbox-scan-btn").addEventListener("click", async () => 
 
 // ---- 手動登録ページ ----
 
-const MANAGE_TABS = ["sec", "tx", "cash", "metal", "estate", "crypto", "pension"];
+const MANAGE_TABS = ["sec", "tx", "transfer", "cash", "metal", "estate", "crypto", "pension"];
 
 document.querySelectorAll(".manage-tab").forEach((btn) => {
   btn.addEventListener("click", () => {
@@ -3945,6 +3962,8 @@ document.querySelectorAll(".manage-tab").forEach((btn) => {
     });
     // 他のタブで口座・銘柄が増えていることがあるので開くたびに揃える
     if (btn.dataset.tab === "tx") _syncManualTxSelects();
+    // 移管は取引・記録の全体から判定するので、開くたびに取り直す
+    if (btn.dataset.tab === "transfer") loadTransfers();
   });
 });
 
@@ -3954,7 +3973,13 @@ async function _loadSecuritiesCache() {
   return _securities;
 }
 
-async function loadManagePage() {
+async function loadManagePage(sub) {
+  // #manage/transfers のように、開くタブを URL で指定できる（銘柄詳細の注記から来る）
+  const tabKey = { transfers: "transfer" }[sub] || sub;
+  if (tabKey && MANAGE_TABS.includes(tabKey)) {
+    const btn = document.querySelector(`.manage-tab[data-tab="${tabKey}"]`);
+    if (btn && !btn.classList.contains("active")) btn.click();
+  }
   // 日付初期値
   ["nh-as-of", "cash-as-of", "metal-as-of", "re-as-of", "pp-as-of", "re-val-date", "mtx-date"].forEach((id) => {
     const el = document.getElementById(id);
@@ -4603,6 +4628,205 @@ function _syncManualTxSelects() {
   if ([...secSel.options].some((o) => o.value === prevSec)) secSel.value = prevSec;
 }
 
+// ---- 口座間の移管 ----
+
+function _transferCandidateTags(c) {
+  const tags = [];
+  if (c.quantity_match) tags.push(t("tr.tagQuantity"));
+  if (c.cost_match === true) tags.push(t("tr.tagCost"));
+  if (c.cost_match === false) tags.push(t("tr.tagCostDiffers"));
+  if (c.early) tags.push(t("tr.tagEarly"));
+  if (c.kind === "buy") tags.push(t("tr.tagBuy"));
+  return tags;
+}
+
+function _transferQty(securityId, q) {
+  const sec = (_securities || []).find((s) => s.id === securityId);
+  return fmtAmount(q, qtyDigits(sec && sec.asset_class));
+}
+
+function _transferSecurityLink(row) {
+  return `<a href="#holdings/detail?id=${encodeURIComponent(row.security_id)}">${escapeHtml(row.security || "")}</a>`;
+}
+
+async function _saveTransfer(row, toAccountId) {
+  hideResult("transfer-result");
+  try {
+    await apiCall("/api/transfers", "POST", {
+      security_id: row.security_id,
+      from_account_id: row.from_account_id,
+      date: row.date,
+      quantity: row.quantity,
+      to_account_id: toAccountId,
+    });
+    showResult("transfer-result", true,
+      toAccountId == null ? t("tr.savedNotTransfer") : t("tr.savedLinked"));
+  } catch (e) {
+    showResult("transfer-result", false, t("status.error") + e.message);
+  }
+  loadTransfers();
+}
+
+async function _undoTransfer(manualId) {
+  hideResult("transfer-result");
+  try {
+    await apiCall(`/api/transfers/${encodeURIComponent(manualId)}`, "DELETE");
+    showResult("transfer-result", true, t("tr.savedUndone"));
+  } catch (e) {
+    showResult("transfer-result", false, t("status.error") + e.message);
+  }
+  loadTransfers();
+}
+
+/** 付け替え用のセレクト（候補の口座へ結び付け直す・移管ではないとする）。 */
+function _transferChangeSelect(row, candidates, currentTo, withNotTransfer) {
+  const sel = document.createElement("select");
+  sel.className = "settings-input transfer-change";
+  const head = document.createElement("option");
+  head.value = "";
+  head.textContent = t("tr.change");
+  sel.appendChild(head);
+  candidates.filter((c) => c.account_id !== currentTo).forEach((c) => {
+    const opt = document.createElement("option");
+    opt.value = String(c.account_id);
+    const tags = _transferCandidateTags(c);
+    opt.textContent = t("tr.linkTo", { account: c.account }) + (tags.length ? `（${tags.join("・")}）` : "");
+    sel.appendChild(opt);
+  });
+  if (withNotTransfer) {
+    const opt = document.createElement("option");
+    opt.value = "none";
+    opt.textContent = t("tr.notTransfer");
+    sel.appendChild(opt);
+  }
+  sel.addEventListener("change", () => {
+    if (!sel.value) return;
+    _saveTransfer(row, sel.value === "none" ? null : Number(sel.value));
+  });
+  return sel.options.length > 1 ? sel : null;
+}
+
+async function loadTransfers() {
+  const box = document.getElementById("transfer-unresolved");
+  const linksBody = document.querySelector("#transfer-links-table tbody");
+  const dismissedBody = document.querySelector("#transfer-dismissed-table tbody");
+  if (!box) return;
+  box.innerHTML = `<p class="muted">${t("label.loading")}</p>`;
+  let data;
+  try {
+    if (!_securities.length) await _loadSecuritiesCache();
+    data = await fetchJSON("/api/transfers");
+  } catch (e) {
+    box.innerHTML = `<p class="muted">${escapeHtml(t("status.error") + e.message)}</p>`;
+    return;
+  }
+
+  // 自動で決められなかった移管元（候補から選ぶ）
+  box.innerHTML = "";
+  (data.unresolved || []).forEach((row) => {
+    const item = document.createElement("div");
+    item.className = "transfer-item";
+    const how = row.source === "snapshot" ? t("tr.srcSnapshot") : t("tr.srcLedger");
+    item.innerHTML = `
+      <div class="transfer-head">
+        ${_transferSecurityLink(row)}
+        <span class="muted">${escapeHtml(t("tr.outLine", {
+          from: row.from_account, date: row.date,
+          qty: _transferQty(row.security_id, row.quantity), how,
+        }))}</span>
+      </div>
+      <div class="transfer-cands"></div>
+    `;
+    const cands = item.querySelector(".transfer-cands");
+    (row.candidates || []).forEach((c) => {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "settings-save-btn secondary transfer-cand";
+      const tags = _transferCandidateTags(c);
+      btn.innerHTML = `${escapeHtml(t("tr.linkTo", { account: c.account }))}
+        <span class="transfer-cand-sub">${escapeHtml(t("tr.candLine", {
+          date: c.first_date, qty: _transferQty(row.security_id, c.quantity),
+        }))}${tags.length ? " · " + escapeHtml(tags.join("・")) : ""}</span>`;
+      btn.addEventListener("click", () => _saveTransfer(row, c.account_id));
+      cands.appendChild(btn);
+    });
+    if (!(row.candidates || []).length) {
+      const p = document.createElement("p");
+      p.className = "muted";
+      p.textContent = t("tr.noCandidates");
+      cands.appendChild(p);
+    }
+    const no = document.createElement("button");
+    no.type = "button";
+    no.className = "delete-btn";
+    no.textContent = t("tr.notTransfer");
+    no.addEventListener("click", () => _saveTransfer(row, null));
+    cands.appendChild(no);
+    box.appendChild(item);
+  });
+  if (!(data.unresolved || []).length) {
+    box.innerHTML = `<p class="muted">${escapeHtml(t("tr.noneUnresolved"))}</p>`;
+  }
+
+  // 結び付けた移管
+  linksBody.innerHTML = "";
+  (data.links || []).forEach((row) => {
+    const tr = document.createElement("tr");
+    const how = row.origin === "manual" ? t("tr.manual")
+      : row.cost_match ? t("tr.autoCost") : t("tr.autoQuantity");
+    tr.innerHTML = `
+      <td>${_transferSecurityLink(row)}</td>
+      <td>${escapeHtml(row.from_account)} → ${escapeHtml(row.to_account)}</td>
+      <td>${escapeHtml(row.date)}</td>
+      <td class="num">${_transferQty(row.security_id, row.quantity)}</td>
+      <td>${escapeHtml(how)}</td>
+      <td class="num transfer-actions"></td>
+    `;
+    const actions = tr.querySelector(".transfer-actions");
+    if (row.origin === "manual") {
+      const undo = document.createElement("button");
+      undo.type = "button";
+      undo.className = "delete-btn";
+      undo.textContent = t("tr.undoManual");
+      undo.addEventListener("click", () => _undoTransfer(row.manual_id));
+      actions.appendChild(undo);
+    } else {
+      const sel = _transferChangeSelect(row, row.candidates || [], row.to_account_id, true);
+      if (sel) actions.appendChild(sel);
+    }
+    linksBody.appendChild(tr);
+  });
+  if (!(data.links || []).length) {
+    linksBody.innerHTML = `<tr><td colspan="6" class="muted">${escapeHtml(t("tr.none"))}</td></tr>`;
+  }
+
+  // 移管ではないとした記録（元に戻す・あとから結び付ける）
+  dismissedBody.innerHTML = "";
+  (data.dismissed || []).forEach((row) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${_transferSecurityLink(row)}</td>
+      <td>${escapeHtml(row.from_account)}</td>
+      <td>${escapeHtml(row.date)}</td>
+      <td class="num">${_transferQty(row.security_id, row.quantity)}</td>
+      <td class="num transfer-actions"></td>
+    `;
+    const actions = tr.querySelector(".transfer-actions");
+    const sel = _transferChangeSelect(row, row.candidates || [], null, false);
+    if (sel) actions.appendChild(sel);
+    const undo = document.createElement("button");
+    undo.type = "button";
+    undo.className = "delete-btn";
+    undo.textContent = t("tr.undoDismiss");
+    undo.addEventListener("click", () => _undoTransfer(row.manual_id));
+    actions.appendChild(undo);
+    dismissedBody.appendChild(tr);
+  });
+  if (!(data.dismissed || []).length) {
+    dismissedBody.innerHTML = `<tr><td colspan="5" class="muted">${escapeHtml(t("tr.none"))}</td></tr>`;
+  }
+}
+
 async function loadManualTransactions() {
   const tbody = document.querySelector("#manage-tx-table tbody");
   tbody.innerHTML = `<tr><td colspan="8" class="loading">${t("label.loading")}</td></tr>`;
@@ -4690,7 +4914,7 @@ document.getElementById("mtx-save").addEventListener("click", async () => {
     }
     showResult("mtx-result", true, parts.join(" "));
     document.getElementById("mtx-result").classList.toggle(
-      "warn", !["traced", "no_earlier_trades"].includes(d.chart_status));
+      "warn", !["traced", "closed", "no_earlier_trades"].includes(d.chart_status));
     // 続けて同じ口座・銘柄の別の日を入れやすいよう、数量・単価・手数料だけ空ける
     ["mtx-quantity", "mtx-price", "mtx-fee"].forEach((id) => {
       document.getElementById(id).value = "";

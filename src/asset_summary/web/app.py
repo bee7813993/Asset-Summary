@@ -57,6 +57,7 @@ from ..core import (
     re_index,
     tag_rules,
     tagging,
+    transfers,
 )
 from ..core.providers import re_index as re_index_provider
 from ..core.crypto_summary_client import (
@@ -320,10 +321,69 @@ def _derive_pension_units_now(
         return []
 
 
+def _to_dec_or_zero(value: Any) -> Decimal:
+    try:
+        return Decimal(str(value)) if value not in (None, "") else ZERO
+    except (ArithmeticError, ValueError):
+        return ZERO
+
+
 def _acct_display(acct: Any) -> str:
     if acct is None:
         return ""
     return acct.display_name or acct.name
+
+
+def _ser_transfer_link(
+    link: Any, accounts: dict[int, Any], secs: dict[int, Any]
+) -> dict[str, Any]:
+    sec = secs.get(link.security_id)
+    return {
+        "security_id": link.security_id,
+        "security": sec.name if sec else "",
+        "from_account_id": link.from_account_id,
+        "from_account": _acct_display(accounts.get(link.from_account_id)),
+        "to_account_id": link.to_account_id,
+        "to_account": _acct_display(accounts.get(link.to_account_id)),
+        "date": link.date.isoformat(),
+        "quantity": _s(link.quantity),
+        "origin": link.origin,          # auto | manual
+        "source": link.source,          # ledger | snapshot | manual
+        "cost_match": link.cost_match,
+        "manual_id": link.manual_id,
+    }
+
+
+def _ser_transfer_out(
+    out: Any, accounts: dict[int, Any], secs: dict[int, Any]
+) -> dict[str, Any]:
+    sec = secs.get(out.security_id)
+    return {
+        "security_id": out.security_id,
+        "security": sec.name if sec else "",
+        "from_account_id": out.account_id,
+        "from_account": _acct_display(accounts.get(out.account_id)),
+        "date": out.date.isoformat(),
+        "quantity": _s(out.quantity),
+        "source": out.source,           # ledger（出庫）| snapshot（保有が 0 に）
+        "carried_cost": _s(out.carried_cost),
+        "closed": out.closed,
+    }
+
+
+def _ser_transfer_candidate(c: Any, accounts: dict[int, Any]) -> dict[str, Any]:
+    a = c.arrival
+    return {
+        "account_id": a.account_id,
+        "account": _acct_display(accounts.get(a.account_id)),
+        "first_date": a.date.isoformat(),
+        "quantity": _s(a.quantity),
+        "avg_cost": _s(a.avg_cost),
+        "kind": a.kind,                 # snapshot | transfer_in | buy
+        "quantity_match": c.quantity_match,
+        "cost_match": c.cost_match,
+        "early": c.early,
+    }
 
 
 def _ser_account_ref(a: dict[str, Any]) -> dict[str, Any]:
@@ -1719,12 +1779,19 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
                 )
                 jpy_disp_series = None
 
+        # 1銘柄の推移は、口座間の移管（証券会社を移した分）もつなぐ。移管元の
+        # 取引履歴と、移管先の最初の記録より前がこれで1本の線になる
         quantity_paths = None
-        if scope_txs:
+        transfer_links: list[Any] = []
+        if scope_t is not None and scope_t[0] == "security":
             sid = int(scope_t[1])
+            sec_snaps = [s for s in snapshots if s.security_id == sid]
+            transfer_links = transfers.resolve(
+                scope_txs, sec_snaps, store.list_transfer_links(security_id=sid)
+            ).links
             quantity_paths = cost_basis.quantity_paths(
-                scope_txs, [s for s in snapshots if s.security_id == sid]
-            )
+                scope_txs, sec_snaps, transfer_links
+            ) or None
 
         points = daily_series(
             snapshots,
@@ -1822,6 +1889,9 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
             "range": range_norm,
             "scope": scope,
             "points": [_ser_history_point(p) for p in points],
+            "transfers": [
+                _ser_transfer_link(link, accounts, secs) for link in transfer_links
+            ],
             "unpriced": sorted(unpriced_names),
             "needs_valuation": sorted(needs_valuation),
             "is_partial": bool(unpriced_names) or cs_is_partial,
@@ -1892,10 +1962,32 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
                 }
             )
 
-        cost_basis = [
-            {**b, "account": _acct_display(accounts.get(b["account_id"]))}
-            for b in basis_by_account.values()
-        ]
+        # 移管で出ていった口座（今は持っていない）には移管先を添える。取得原価の
+        # カードで、その口座の履歴が「いまの保有を説明している」と読めないように
+        moved_out: dict[int, Any] = {}
+        for link in transfers.resolve(
+            store.list_transactions(security_id=security_id),
+            [s for s in store.all_snapshots() if s.security_id == security_id],
+            store.list_transfer_links(security_id=security_id),
+        ).links:
+            if link.from_account_id not in moved_out or link.date > moved_out[link.from_account_id].date:
+                moved_out[link.from_account_id] = link
+        cost_basis = []
+        for b in basis_by_account.values():
+            row = {**b, "account": _acct_display(accounts.get(b["account_id"]))}
+            link = moved_out.get(b["account_id"])
+            held = _to_dec_or_zero(b.get("covered_quantity")) + _to_dec_or_zero(
+                b.get("residual_quantity")
+            )
+            if link is not None and held == ZERO:
+                row["transferred_to"] = _acct_display(accounts.get(link.to_account_id))
+                row["transferred_on"] = link.date.isoformat()
+                # 「取込前に売却済みとみなしました」は移管には当たらない
+                row["warnings"] = [
+                    w for w in (row.get("warnings") or [])
+                    if not (isinstance(w, dict) and w.get("code") == "CLOSED_POSITION")
+                ]
+            cost_basis.append(row)
         tx_count = store.count_transactions(security_id=security_id)
 
         end = date.today()
@@ -2276,6 +2368,100 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
             )
         store.delete_transaction(tx_id)
         recompute_cost_basis(store)
+        return {"ok": True}
+
+    # ------------------------------------------------------------------
+    # 口座間の移管（証券会社を移した銘柄）
+    # ------------------------------------------------------------------
+
+    @app.get("/api/transfers")
+    def api_transfers() -> dict[str, Any]:
+        """結び付けた移管と、自動では決められなかった移管の候補。"""
+        accounts = {a.id: a for a in store.list_accounts()}
+        secs = store.securities_by_id()
+        res = transfers.resolve(
+            store.list_transactions(), store.all_snapshots(), store.list_transfer_links()
+        )
+        dismissed = []
+        for out, decision in res.dismissed:
+            row = (
+                _ser_transfer_out(out, accounts, secs) if out is not None else {
+                    "security_id": decision.security_id,
+                    "security": secs[decision.security_id].name
+                    if decision.security_id in secs else "",
+                    "from_account_id": decision.from_account_id,
+                    "from_account": _acct_display(accounts.get(decision.from_account_id)),
+                    "date": decision.date.isoformat(),
+                    "quantity": _s(decision.quantity),
+                    "source": None,
+                }
+            )
+            dismissed.append({
+                **row, "manual_id": decision.id, "found": out is not None,
+                "candidates": [
+                    _ser_transfer_candidate(c, accounts)
+                    for c in res.candidates.get(decision.key, [])
+                ],
+            })
+        return {
+            "links": [
+                {
+                    **_ser_transfer_link(link, accounts, secs),
+                    "candidates": [
+                        _ser_transfer_candidate(c, accounts)
+                        for c in res.candidates.get(
+                            (link.security_id, link.from_account_id, link.date), []
+                        )
+                    ],
+                }
+                for link in res.links
+            ],
+            "unresolved": [
+                {
+                    **_ser_transfer_out(out, accounts, secs),
+                    "candidates": [_ser_transfer_candidate(c, accounts) for c in cands],
+                }
+                for out, cands in res.unresolved
+            ],
+            "dismissed": dismissed,
+            "generated_at": _utcnow_iso(),
+        }
+
+    @app.post("/api/transfers")
+    def api_transfer_set(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        """移管元の出来事ひとつについて、移管先を決める（to_account_id=null は「移管ではない」）。"""
+        sec_id = _to_int(payload.get("security_id"), "security_id", minimum=1)
+        if store.get_security(sec_id) is None:
+            raise HTTPException(status_code=404, detail="銘柄が見つかりません")
+        from_id = _to_int(payload.get("from_account_id"), "from_account_id", minimum=1)
+        if store.get_account(from_id) is None:
+            raise HTTPException(status_code=404, detail="移管元の口座が見つかりません")
+        to_raw = payload.get("to_account_id")
+        to_id = None
+        if to_raw is not None:
+            to_id = _to_int(to_raw, "to_account_id", minimum=1)
+            if store.get_account(to_id) is None:
+                raise HTTPException(status_code=404, detail="移管先の口座が見つかりません")
+            if to_id == from_id:
+                raise HTTPException(status_code=400, detail="移管元と移管先が同じ口座です")
+        transfer_date = _to_date(payload.get("date"), "date")
+        quantity = _to_decimal(payload.get("quantity"), "quantity")
+        if quantity <= 0:
+            raise HTTPException(status_code=400, detail="数量は正の数で指定してください")
+        link_id = store.set_transfer_link(
+            security_id=sec_id,
+            from_account_id=from_id,
+            transfer_date=transfer_date,
+            quantity=quantity,
+            to_account_id=to_id,
+        )
+        return {"ok": True, "id": link_id}
+
+    @app.delete("/api/transfers/{link_id}")
+    def api_transfer_delete(link_id: int) -> dict[str, Any]:
+        """利用者の判断を取り消す（その出来事は自動の判定に戻る）。"""
+        if not store.delete_transfer_link(link_id):
+            raise HTTPException(status_code=404, detail="移管の判断が見つかりません")
         return {"ok": True}
 
     @app.get("/api/cost-basis")

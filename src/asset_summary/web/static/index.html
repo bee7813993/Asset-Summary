@@ -1234,6 +1234,7 @@
         <div class="import-tabs">
           <button class="import-tab manage-tab active" data-tab="sec" data-i18n="manage.tabSecurities">銘柄・保有</button>
           <button class="import-tab manage-tab" data-tab="tx" data-i18n="manage.tabTx">取引</button>
+          <button class="import-tab manage-tab" data-tab="transfer" data-i18n="manage.tabTransfer">移管</button>
           <button class="import-tab manage-tab" data-tab="cash" data-i18n="manage.tabCash">現金・預金</button>
           <button class="import-tab manage-tab" data-tab="metal" data-i18n="manage.tabMetal">貴金属</button>
           <button class="import-tab manage-tab" data-tab="estate" data-i18n="manage.tabEstate">不動産</button>
@@ -1421,6 +1422,53 @@
                     <th class="num" data-i18n="th.quantity">数量</th>
                     <th class="num" data-i18n="tx.thUnitPrice">単価</th>
                     <th class="num" data-i18n="tx.thNetAmount">受渡金額</th>
+                    <th class="num" data-i18n="th.actions">操作</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+
+        <!-- 移管タブ（証券会社間で移した銘柄の結び付け） -->
+        <div id="manage-tab-transfer" class="manage-tab-content hidden">
+          <section class="card import-section">
+            <h2 data-i18n="manage.trUnresolvedTitle">移管先を選んでください</h2>
+            <p class="card-hint" data-i18n="manage.trHint">株・投信を別の証券会社へ移した記録（取引履歴の出庫、または保有が 0 になった記録）を、移管先の口座で最初に現れた記録と結び付けます。結び付けると、銘柄詳細の推移グラフが移管の前後で1本の線になります。数量が一致して移管先が1つに決まるものは自動で結び付けます。ここには自動では決められなかったものが出ます。</p>
+            <div id="transfer-unresolved" class="transfer-list"></div>
+            <div id="transfer-result" class="settings-result hidden"></div>
+          </section>
+
+          <section class="card import-section">
+            <h2 data-i18n="manage.trLinksTitle">結び付けた移管</h2>
+            <div class="table-wrap">
+              <table id="transfer-links-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="th.security">銘柄</th>
+                    <th data-i18n="tr.thRoute">移管元 → 移管先</th>
+                    <th data-i18n="tr.thDate">移管日</th>
+                    <th class="num" data-i18n="th.quantity">数量</th>
+                    <th data-i18n="tr.thHow">判定</th>
+                    <th class="num" data-i18n="th.actions">操作</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="card import-section">
+            <h2 data-i18n="manage.trDismissedTitle">移管ではないとした記録</h2>
+            <div class="table-wrap">
+              <table id="transfer-dismissed-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="th.security">銘柄</th>
+                    <th data-i18n="tr.thFrom">移管元</th>
+                    <th data-i18n="tr.thDate">移管日</th>
+                    <th class="num" data-i18n="th.quantity">数量</th>
                     <th class="num" data-i18n="th.actions">操作</th>
                   </tr>
                 </thead>

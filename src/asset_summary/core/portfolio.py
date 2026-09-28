@@ -680,6 +680,47 @@ def _traced_snapshot(
     )
 
 
+def _ledger_only_lot(
+    key: tuple[int, int],
+    securities: dict[int, Security],
+    price_series: dict[int, tuple[dict[str, Decimal], str]],
+    scope: tuple[str, str] | None,
+    excluded: set[Any],
+    ratio_by_security: dict[int, Decimal] | None,
+) -> tuple[dict[str, Any], HoldingSnapshot] | None:
+    """スナップショットの無い口座×銘柄を評価するための仮のロット。
+
+    1銘柄の推移にだけ使う（取引履歴の数量を足してよいのは単位の揃う1銘柄の中）。
+    記載評価額も平均取得単価も無いので、価格が無い日は評価額 0、保有数だけ数える。
+    """
+    account_id, security_id = key
+    sec = securities.get(security_id)
+    if sec is None or sec.asset_class in excluded:
+        return None
+    if scope is None or scope[0] != "security" or scope[1] != str(security_id):
+        return None
+    if ratio_by_security is not None and not ratio_by_security.get(security_id):
+        return None
+    series, ccy = price_series.get(security_id, ({}, sec.currency))
+    lot = {
+        "sec": sec,
+        "snaps": [],
+        "snap_dates": [],
+        "price": SeriesLookup(series),
+        "price_ccy": ccy,
+        "ratio": (
+            ratio_by_security.get(security_id, ZERO)
+            if ratio_by_security is not None
+            else Decimal("1")
+        ),
+    }
+    shape = HoldingSnapshot(
+        account_id=account_id, security_id=security_id, as_of_date=date.min,
+        quantity=ZERO, origin="ledger",
+    )
+    return (lot, shape)
+
+
 def daily_series(
     snapshots: Iterable[HoldingSnapshot],
     securities: dict[int, Security],
@@ -776,6 +817,13 @@ def daily_series(
             if (p["snaps"][0].account_id, p["snaps"][0].security_id) == key
         ]
         if not members:
+            # スナップショットの無い口座×銘柄（売り切った・移管した、今は持って
+            # いない保有）。全期間を取引履歴の数量で、価格から評価する
+            ledger_only = _ledger_only_lot(
+                key, securities, price_series, scope, excluded, ratio_by_security
+            )
+            if ledger_only is not None:
+                traced.append({"lot": ledger_only[0], "path": path, "firsts": [ledger_only[1]]})
             continue
         for p in members:
             p["traced"] = True
