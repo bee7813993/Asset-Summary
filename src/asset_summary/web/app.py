@@ -46,6 +46,7 @@ from ..core.models import (
     Unit,
 )
 from ..core import (
+    cost_basis,
     crypto_summary_client,
     fund_autolink,
     portfolio,
@@ -776,10 +777,18 @@ def _ser_history_point(p: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _range_start(range_key: str, snapshots: list[HoldingSnapshot], end: date) -> date:
+def _range_start(
+    range_key: str,
+    snapshots: list[HoldingSnapshot],
+    end: date,
+    first_trade: date | None = None,
+) -> date:
+    """表示範囲の開始日。ALL は5年前と最古の記録（取引履歴を渡せば最初の約定）の早いほう。"""
     if range_key == "all":
         five_years_ago = end - timedelta(days=365 * 5)
         oldest = min((s.as_of_date for s in snapshots), default=five_years_ago)
+        if first_trade is not None:
+            oldest = min(oldest, first_trade)
         return min(oldest, five_years_ago)
     days = _RANGE_DAYS.get(range_key, 90)
     return end - timedelta(days=days)
@@ -1625,12 +1634,17 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
         # その銘柄のぶんだけで足りる — 全銘柄を回すと、ALL の範囲では他の銘柄の
         # 履歴取得まで走ってしまう
         priced_secs = secs
+        # 1銘柄の推移だけは、最初の取込より前を取引履歴でさかのぼる。
+        # 総資産・クラス・口座では使わない — 現金の出入りは台帳に無いので、
+        # 株だけ過去へ戻すと「現金で買った」ことが資産の増加に見えてしまう
+        scope_txs: list[Any] = []
         if scope_t is not None and scope_t[0] == "security":
             sec_id = _to_int(scope_t[1], "security")
             if sec_id not in secs:
                 raise HTTPException(status_code=404, detail="銘柄が見つかりません")
             scope_t = ("security", str(sec_id))
             priced_secs = {sec_id: secs[sec_id]}
+            scope_txs = store.list_transactions(security_id=sec_id)
         # タグ・Myポートフォリオは「銘柄の集合」ではなく「銘柄ごとの計上率」で
         # 決まるので、daily_series には scope ではなく重みを渡す
         ratio_by_security: dict[Any, Decimal] | None = None
@@ -1649,7 +1663,10 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
             series_scope = None
         accounts = {a.id: a for a in store.list_accounts()}
         end = date.today()
-        start = _range_start(range_key, snapshots, end)
+        start = _range_start(
+            range_key, snapshots, end,
+            first_trade=scope_txs[0].trade_date if scope_txs else None,
+        )
 
         linked = [
             s
@@ -1691,6 +1708,13 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
                 )
                 jpy_disp_series = None
 
+        quantity_paths = None
+        if scope_txs:
+            sid = int(scope_t[1])
+            quantity_paths = cost_basis.quantity_paths(
+                scope_txs, [s for s in snapshots if s.security_id == sid]
+            )
+
         points = daily_series(
             snapshots,
             secs,
@@ -1703,6 +1727,7 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
             jpy_per_display_series=jpy_disp_series,
             scope=series_scope,
             ratio_by_security=ratio_by_security,
+            quantity_paths=quantity_paths,
         )
 
         # 価格が無い保有を2つに分ける。is_partial は「取得中＝待てば出る」という
@@ -1863,7 +1888,12 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
         tx_count = store.count_transactions(security_id=security_id)
 
         end = date.today()
-        start = _range_start(range_key, store.all_snapshots(), end)
+        # ALL は取引履歴の最初の約定まで（評価額・保有数の推移と同じ範囲にそろえる）
+        first_tx = store.list_transactions(security_id=security_id, limit=1)
+        start = _range_start(
+            range_key, store.all_snapshots(), end,
+            first_trade=first_tx[0].trade_date if first_tx else None,
+        )
         if sec.price_source_status == PriceSourceStatus.LINKED:
             try:
                 ensure_price_history(store, [sec], start, end, warn=warnings.append)

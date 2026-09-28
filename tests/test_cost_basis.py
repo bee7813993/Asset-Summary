@@ -15,6 +15,7 @@ import pytest
 from asset_summary.core.cost_basis import (
     Anchor,
     build_anchors,
+    quantity_paths,
     reconcile_all,
     reconcile_closed,
     reconcile_group,
@@ -456,3 +457,115 @@ def test_reconcile_all_ignores_unmatched_transactions():
     txs[0].security_id = None
     results, _ = reconcile_all(txs, lots, {10: _sec()})
     assert results == []
+
+
+# ----------------------------------------------------------------------
+# 推移グラフ用: 最初のスナップショットより前の保有数（quantity_paths）
+# ----------------------------------------------------------------------
+
+
+def _day(iso: str) -> date:
+    return date.fromisoformat(iso)
+
+
+def test_path_walks_back_to_zero_when_the_ledger_covers_everything():
+    """全期間を覆う履歴なら、最初の買付より前は「持っていない」になる。"""
+    snaps = [_lot(qty="150", as_of="2026-08-04")]
+    txs = [buy("2025-03-10", 100, 1000), buy("2026-01-15", 50, 1200)]
+    path = quantity_paths(txs, snaps)[(1, 10)]
+    assert path.before == _day("2026-08-04")
+    assert path.at(_day("2025-03-09")) == (D("0"), False)
+    assert path.at(_day("2025-03-10")) == (D("100"), False)
+    assert path.at(_day("2025-12-31")) == (D("100"), False)
+    assert path.at(_day("2026-08-03")) == (D("150"), False)
+
+
+def test_path_keeps_the_opening_lot_as_carried_back():
+    """履歴より前から持っていた分は、いつからあるか判らないので遡った扱い。"""
+    snaps = [_lot(qty="130", as_of="2026-08-04")]
+    txs = [buy("2026-02-01", 50, 1000), sell("2026-05-01", 20, 1100)]
+    path = quantity_paths(txs, snaps)[(1, 10)]
+    assert path.at(_day("2026-01-31")) == (D("100"), True)
+    assert path.at(_day("2026-02-01")) == (D("150"), False)
+    assert path.at(_day("2026-05-01")) == (D("130"), False)
+
+
+def test_path_undoes_a_split_by_its_ratio():
+    snaps = [_lot(qty="200", as_of="2026-08-04")]
+    txs = [buy("2026-01-10", 100, 1000), split("2026-04-01", ratio=2)]
+    path = quantity_paths(txs, snaps)[(1, 10)]
+    assert path.at(_day("2026-03-31")) == (D("100"), False)
+    assert path.at(_day("2026-04-01")) == (D("200"), False)
+    assert path.at(_day("2026-01-09")) == (D("0"), False)
+
+
+def test_path_records_the_end_of_day_quantity_once_per_trade_day():
+    snaps = [_lot(qty="120", as_of="2026-08-04")]
+    txs = [buy("2026-03-02", 100, 1000), sell("2026-03-02", 30, 1000),
+           buy("2026-03-02", 50, 1000)]
+    path = quantity_paths(txs, snaps)[(1, 10)]
+    assert path.changes == ((_day("2026-03-02"), D("120")),)
+    assert path.opening == D("0")
+
+
+def test_path_anchors_on_a_day_without_trades_for_a_morning_import():
+    """朝の自動取込は、その日の約定をまだ含まない。
+
+    8/4 朝の取込（100株）は 8/4 の買付50株を含まず、翌朝（150株）で入る。
+    8/4 の数量を錨にして 8/4 の約定まで打ち消すと、過去が 50株 少なく出る。
+    約定の無い 8/5 を錨にすれば、取込の時刻によらず正しく戻せる。
+    """
+    snaps = [_lot(qty="100", as_of="2026-08-04"), _lot(qty="150", as_of="2026-08-05")]
+    txs = [buy("2026-01-10", 100, 1000), buy("2026-08-04", 50, 1000)]
+    path = quantity_paths(txs, snaps)[(1, 10)]
+    assert path.at(_day("2026-08-03")) == (D("100"), False)
+    assert path.at(_day("2026-01-09")) == (D("0"), False)
+
+
+def test_path_anchors_on_a_day_without_trades_for_an_evening_import():
+    """夕方の取込はその日の約定を含む。この場合も過去は約定前の数量になる。"""
+    snaps = [_lot(qty="150", as_of="2026-08-04"), _lot(qty="150", as_of="2026-08-05")]
+    txs = [buy("2026-01-10", 100, 1000), buy("2026-08-04", 50, 1000)]
+    path = quantity_paths(txs, snaps)[(1, 10)]
+    assert path.at(_day("2026-08-03")) == (D("100"), False)
+
+
+def test_no_path_without_trades_before_the_first_snapshot():
+    snaps = [_lot(qty="150", as_of="2026-08-04")]
+    txs = [buy("2026-08-20", 50, 1000)]
+    assert quantity_paths(txs, snaps) == {}
+
+
+def test_no_path_when_lots_start_on_different_days():
+    """後から現れたロットが買付か、既存の保有が行を分けただけかは決められない。"""
+    snaps = [_lot(qty="100", as_of="2026-08-04"), _lot(lot_seq=1, qty="30", as_of="2026-09-10")]
+    txs = [buy("2026-01-10", 100, 1000)]
+    assert quantity_paths(txs, snaps) == {}
+
+
+def test_no_path_when_the_ledger_contradicts_the_snapshot():
+    """さかのぼる途中で保有数が負になる履歴（二重取込・売却行の欠落）は使わない。"""
+    snaps = [_lot(qty="100", as_of="2026-08-04")]
+    txs = [buy("2026-01-10", 150, 1000)]
+    assert quantity_paths(txs, snaps) == {}
+
+
+def test_path_ignores_income_rows_and_unmatched_trades():
+    snaps = [_lot(qty="100", as_of="2026-08-04")]
+    unmatched = buy("2026-02-01", 999, 1000)
+    unmatched.security_id = None
+    txs = [buy("2026-01-10", 100, 1000), dividend("2026-03-01", 500), roc("2026-04-01", 300),
+           unmatched]
+    path = quantity_paths(txs, snaps)[(1, 10)]
+    assert path.changes == ((_day("2026-01-10"), D("100")),)
+    assert path.opening == D("0")
+
+
+def test_paths_are_kept_per_account():
+    snaps = [_lot(qty="100", as_of="2026-08-04"),
+             HoldingSnapshot(account_id=2, security_id=10, as_of_date=_day("2026-08-04"),
+                             quantity=D("40"), origin="mf")]
+    txs = [buy("2026-01-10", 100, 1000), buy("2026-02-10", 40, 1000, account_id=2)]
+    paths = quantity_paths(txs, snaps)
+    assert paths[(1, 10)].at(_day("2026-02-01")) == (D("100"), False)
+    assert paths[(2, 10)].at(_day("2026-02-01")) == (D("0"), False)

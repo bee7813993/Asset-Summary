@@ -43,6 +43,7 @@ ME の PDF は「いま何株持っているか」を正確に持っている。
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -219,6 +220,25 @@ def _ordered(txs: Iterable[Transaction]) -> list[Transaction]:
     )
 
 
+def _quantity_step(tx: Transaction) -> tuple[Decimal, Decimal] | None:
+    """取引が保有数をどう動かすか: (倍率, 増減) で 後 = 前 × 倍率 + 増減。
+
+    保有数を動かさない取引（配当・元本払戻・現金の出入りなど）は None。
+    数量の符号はファイルの書き方に左右されるので、種別で決める。
+    """
+    if tx.tx_type in (TxType.BUY, TxType.REINVEST, TxType.TRANSFER_IN):
+        return (Decimal(1), _abs(tx.quantity))
+    if tx.tx_type in (TxType.SELL, TxType.TRANSFER_OUT):
+        return (Decimal(1), -_abs(tx.quantity))
+    if tx.tx_type is TxType.SPLIT:
+        ratio = _split_ratio(tx)
+        if ratio is not None:
+            return (ratio, ZERO)
+        if tx.quantity is not None:
+            return (Decimal(1), tx.quantity)
+    return None
+
+
 # ----------------------------------------------------------------------
 # 突合本体
 # ----------------------------------------------------------------------
@@ -277,17 +297,11 @@ def reconcile_group(
     # ---- パス1: 数量。q_A = α·q0 + β
     alpha, beta = Decimal(1), ZERO
     for tx in usable:
-        if tx.tx_type in (TxType.BUY, TxType.REINVEST, TxType.TRANSFER_IN):
-            beta += _abs(tx.quantity)
-        elif tx.tx_type in (TxType.SELL, TxType.TRANSFER_OUT):
-            beta -= _abs(tx.quantity)
-        elif tx.tx_type is TxType.SPLIT:
-            ratio = _split_ratio(tx)
-            if ratio is not None:
-                alpha *= ratio
-                beta *= ratio
-            elif tx.quantity is not None:
-                beta += tx.quantity
+        step = _quantity_step(tx)
+        if step is not None:
+            mult, delta = step
+            alpha *= mult
+            beta = beta * mult + delta
 
     if alpha == 0:
         result.warnings.append(
@@ -737,3 +751,115 @@ def reconcile_all(
             )
         )
     return (results, warnings)
+
+
+# ----------------------------------------------------------------------
+# 推移グラフ用: 最初のスナップショットより前の保有数
+# ----------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class QuantityPath:
+    """口座×銘柄の、最初のスナップショットより前の保有数（取引履歴から逆算）。
+
+    before（最初のスナップショットの日）より前にだけ使う。それ以降は
+    スナップショットが正。changes は (約定日, その日からの保有数) の昇順で、
+    最初の約定日より前は opening ＝ 取引履歴より前から持っていた分（期首ロット）。
+    期首ロットはいつから持っていたか判らないので、記録ではなく遡った数量として
+    扱う。完全被覆なら opening は 0 で、最初の買付より前は持っていない。
+    """
+
+    before: date
+    changes: tuple[tuple[date, Decimal], ...]
+    opening: Decimal
+
+    def at(self, day: date) -> tuple[Decimal, bool]:
+        """(その日の保有数, 記録ではなく遡った数量か)。"""
+        i = bisect_right(self.changes, day, key=lambda c: c[0])
+        if i == 0:
+            return (self.opening, self.opening > QTY_EPSILON)
+        return (self.changes[i - 1][1], False)
+
+
+def quantity_paths(
+    transactions: Sequence[Transaction],
+    snapshots: Sequence[HoldingSnapshot],
+) -> dict[tuple[int, int], QuantityPath]:
+    """口座×銘柄ごとに、最初のスナップショットより前の保有数を取引履歴から戻す。
+
+    推移グラフ（銘柄詳細の保有数・評価額）で、最初の取込より前を「最初の
+    保有数のまま」ではなく実際の数量で描くための材料。スナップショットを錨に、
+    約定を新しい順に打ち消しながらさかのぼる。錨の数量はそのまま残るので、
+    取込の前後で線はつながる。
+
+    次の口座×銘柄は作らない（呼び出し側は従来どおり最初の保有数で遡る）:
+    - 最初のスナップショットより前の約定が無い（さかのぼる材料が無い）
+    - ロットごとに記録の始まる日が違う（後から現れたロットが買付なのか、
+      既存の保有が行を分けただけなのかを決められない）
+    - さかのぼる途中で保有数が負になる（二重取込・売却行の欠落・銘柄の誤照合。
+      スナップショットと合わない数字は描かない）
+    """
+    snaps_by_group: dict[tuple[int, int], list[HoldingSnapshot]] = {}
+    for s in snapshots:
+        snaps_by_group.setdefault((s.account_id, s.security_id), []).append(s)
+    txs_by_group: dict[tuple[int, int], list[Transaction]] = {}
+    for tx in transactions:
+        if tx.security_id is None or _quantity_step(tx) is None:
+            continue
+        txs_by_group.setdefault((tx.account_id, tx.security_id), []).append(tx)
+
+    out: dict[tuple[int, int], QuantityPath] = {}
+    for key, snaps in snaps_by_group.items():
+        txs = txs_by_group.get(key)
+        if not txs:
+            continue
+        path = _group_quantity_path(snaps, _ordered(txs))
+        if path is not None:
+            out[key] = path
+    return out
+
+
+def _group_quantity_path(
+    snaps: list[HoldingSnapshot], txs: list[Transaction]
+) -> QuantityPath | None:
+    lots: dict[int, list[HoldingSnapshot]] = {}
+    for s in snaps:
+        lots.setdefault(s.lot_seq, []).append(s)
+    starts = {min(s.as_of_date for s in members) for members in lots.values()}
+    if len(starts) != 1:
+        return None
+    first = starts.pop()
+    if not any(t.trade_date < first for t in txs):
+        return None
+
+    # 錨は「その日に約定の無い」最初のスナップショット日。取込の基準日に約定が
+    # あると、それがスナップショットに入っているか（夕方の取込）いないか（朝の
+    # 自動取込）が判らない。約定の無い日の数量ならどちらでも同じになる。
+    # そういう日が無ければ突合（reconcile_group）と同じく基準日の約定を含める
+    trade_days = {t.trade_date for t in txs}
+    anchor = next(
+        (d for d in sorted({s.as_of_date for s in snaps}) if d not in trade_days), first
+    )
+    held = ZERO
+    for members in lots.values():
+        upto = [s for s in members if s.as_of_date <= anchor]
+        held += max(upto, key=lambda s: s.as_of_date).quantity
+
+    by_day: dict[date, list[Transaction]] = {}
+    for t in txs:
+        if t.trade_date <= anchor:
+            by_day.setdefault(t.trade_date, []).append(t)
+    q = held
+    changes: list[tuple[date, Decimal]] = []
+    for day in sorted(by_day, reverse=True):
+        if day < first:
+            changes.append((day, q))
+        for t in reversed(by_day[day]):
+            mult, delta = _quantity_step(t)
+            q = (q - delta) / mult
+        if q < -QTY_EPSILON:
+            return None
+        if abs(q) <= QTY_EPSILON:
+            q = ZERO
+    changes.reverse()
+    return QuantityPath(before=first, changes=tuple(changes), opening=q)

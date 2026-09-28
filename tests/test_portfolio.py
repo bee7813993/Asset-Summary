@@ -10,12 +10,14 @@ from asset_summary.core.models import (
     Security,
     Unit,
 )
+from asset_summary.core.cost_basis import quantity_paths
 from asset_summary.core.portfolio import (
     SeriesLookup,
     aggregate_by_security,
     daily_series,
     summarize,
 )
+from tests.fixtures.tx_factories import buy
 
 D = Decimal
 
@@ -295,6 +297,81 @@ def test_daily_series_security_scope_ignores_total_exclusion():
     )
     assert one[0]["value"] == D("2256")
     assert one[0]["quantity"] == D("2256")
+
+
+def test_daily_series_uses_the_ledger_before_the_first_snapshot():
+    """取引履歴がある口座×銘柄は、最初の取込より前を実際の数量で評価する。"""
+    secs = {1: _sec(1)}
+    snaps = [_snap(1, as_of_date=date(2026, 8, 5), quantity=D("100"))]
+    txs = [buy("2026-08-02", 60, 1000, security_id=1),
+           buy("2026-08-04", 40, 1000, security_id=1)]
+    prices = {1: ({"2026-08-01": D("1000")}, "JPY")}
+    out = daily_series(
+        snaps, secs, ACCOUNTS, prices, {}, date(2026, 8, 1), date(2026, 8, 6), SETTINGS,
+        scope=("security", "1"), quantity_paths=quantity_paths(txs, snaps),
+    )
+    by_date = {r["t"]: r for r in out}
+    # 最初の買付より前は持っていない（全期間を覆う履歴なので遡りではない）
+    assert by_date["2026-08-01"]["quantity"] == D("0")
+    assert by_date["2026-08-01"]["value"] == D("0")
+    assert by_date["2026-08-01"]["backfilled"] is False
+    assert by_date["2026-08-03"]["quantity"] == D("60")
+    assert by_date["2026-08-03"]["value"] == D("60000")
+    assert by_date["2026-08-04"]["quantity"] == D("100")
+    # 取込の日からはスナップショットが正
+    assert by_date["2026-08-06"]["quantity"] == D("100")
+    assert not any(r["backfilled"] for r in out)
+
+
+def test_daily_series_carries_the_opening_lot_back_as_backfilled():
+    secs = {1: _sec(1)}
+    snaps = [_snap(1, as_of_date=date(2026, 8, 5), quantity=D("100"))]
+    txs = [buy("2026-08-03", 30, 1000, security_id=1)]
+    prices = {1: ({"2026-08-01": D("1000")}, "JPY")}
+    out = daily_series(
+        snaps, secs, ACCOUNTS, prices, {}, date(2026, 8, 1), date(2026, 8, 5), SETTINGS,
+        scope=("security", "1"), quantity_paths=quantity_paths(txs, snaps),
+    )
+    by_date = {r["t"]: r for r in out}
+    assert by_date["2026-08-02"]["quantity"] == D("70")
+    assert by_date["2026-08-02"]["backfilled"] is True     # 履歴より前の期首ロット
+    assert by_date["2026-08-03"]["quantity"] == D("100")
+    assert by_date["2026-08-03"]["backfilled"] is False
+
+
+def test_daily_series_ledger_leaves_other_accounts_backfilled():
+    """台帳の無い口座のロットは、従来どおり最初の保有数で遡る。"""
+    secs = {1: _sec(1)}
+    accounts = {1: Account(id=1, name="A証券"), 2: Account(id=2, name="B証券")}
+    snaps = [
+        _snap(1, account_id=1, as_of_date=date(2026, 8, 5), quantity=D("100")),
+        _snap(1, account_id=2, as_of_date=date(2026, 8, 5), quantity=D("10")),
+    ]
+    txs = [buy("2026-08-03", 100, 1000, security_id=1, account_id=1)]
+    prices = {1: ({"2026-08-01": D("1000")}, "JPY")}
+    out = daily_series(
+        snaps, secs, accounts, prices, {}, date(2026, 8, 1), date(2026, 8, 5), SETTINGS,
+        scope=("security", "1"), quantity_paths=quantity_paths(txs, snaps),
+    )
+    by_date = {r["t"]: r for r in out}
+    assert by_date["2026-08-02"]["quantity"] == D("10")    # B証券の遡りだけ
+    assert by_date["2026-08-02"]["backfilled"] is True
+    assert by_date["2026-08-03"]["quantity"] == D("110")
+
+
+def test_daily_series_ledger_falls_back_to_the_reported_value_without_a_price():
+    """価格が無い期間は、最初の取込の記載評価額を数量に比例させて使う。"""
+    secs = {1: _sec(1, code=None, asset_class=AssetClass.FUND_JP, price_unit_divisor=10000)}
+    snaps = [_snap(1, as_of_date=date(2026, 8, 5), quantity=D("20000"),
+                   avg_cost=D("10000"), reported_value_jpy=D("24000"))]
+    txs = [buy("2026-08-03", 10000, 11000, security_id=1, divisor=10000)]
+    out = daily_series(
+        snaps, secs, ACCOUNTS, {}, {}, date(2026, 8, 2), date(2026, 8, 3), SETTINGS,
+        scope=("security", "1"), quantity_paths=quantity_paths(txs, snaps),
+    )
+    by_date = {r["t"]: r for r in out}
+    assert by_date["2026-08-02"]["quantity"] == D("10000")
+    assert by_date["2026-08-02"]["value"] == D("12000")
 
 
 def test_daily_series_zero_quantity_after_sale():

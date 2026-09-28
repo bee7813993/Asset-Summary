@@ -26,9 +26,11 @@ import asset_summary.web.app as web_app
 from asset_summary.core.models import (
     AssetClass,
     HoldingSnapshot,
+    ImportBatch,
     PriceSourceStatus,
     PriceSourceType,
     Security,
+    Transaction,
     Unit,
 )
 from asset_summary.importers.service import DuplicateImportError
@@ -488,6 +490,59 @@ def test_portfolio_history_security_scope_marks_backfilled_days(client, store):
     assert flags[(first - timedelta(days=1)).isoformat()] is True
     assert flags[first.isoformat()] is False
     assert all(p["quantity"] == "10" for p in data["points"])
+
+
+def test_portfolio_history_security_scope_walks_back_through_the_ledger(client, store):
+    """取引履歴のある銘柄は、最初の取込より前も実際の保有数で描く。
+
+    総資産の推移には使わない（現金の出入りが台帳に無いため）。
+    """
+    acct = store.get_or_create_account("マネー証券", kind="broker")
+    sec_id = store.create_security(
+        Security(name="長期工業", name_key="ちょうきこうぎょう", code="7777",
+                 asset_class=AssetClass.STOCK_JP,
+                 price_source_type=PriceSourceType.YAHOO, price_source_ref="7777.T",
+                 price_source_status=PriceSourceStatus.LINKED)
+    )
+    store.upsert_snapshot(
+        HoldingSnapshot(account_id=acct.id, security_id=sec_id,
+                        as_of_date=date(2026, 8, 4), quantity=D("100"), avg_cost=D("950"))
+    )
+    for day, px in (("2019-04-01", "800"), ("2023-06-01", "1000"), ("2026-08-03", "1200")):
+        store.upsert_daily_price("yahoo", "7777.T", day, D(px), "JPY")
+    store.create_batch(ImportBatch(id="tx-ledger", source_kind="broker_csv"))
+    store.insert_transactions(
+        [
+            Transaction(dedup_key="l1", account_id=acct.id, security_id=sec_id,
+                        trade_date=date(2019, 4, 1), tx_type="buy", quantity=D("60"),
+                        unit_price=D("800"), gross_amount=D("48000")),
+            Transaction(dedup_key="l2", account_id=acct.id, security_id=sec_id,
+                        trade_date=date(2023, 6, 1), tx_type="buy", quantity=D("40"),
+                        unit_price=D("1000"), gross_amount=D("40000")),
+        ],
+        batch_id="tx-ledger",
+    )
+
+    data = client.get(
+        "/api/portfolio-history", params={"range": "all", "scope": f"security:{sec_id}"}
+    ).json()
+    pts = {p["t"]: p for p in data["points"]}
+    # ALL は5年より前でも最初の約定まで届く
+    assert data["points"][0]["t"] == "2019-04-01"
+    assert pts["2019-04-01"]["quantity"] == "60"
+    assert D(pts["2019-04-01"]["value"]) == D("48000")      # 60株 × 800円
+    assert pts["2023-05-31"]["quantity"] == "60"
+    assert pts["2023-06-01"]["quantity"] == "100"
+    assert not any(p["backfilled"] for p in data["points"])
+
+    # 価格の推移も同じ範囲（表示対象を切り替えても横軸がそろう）
+    detail = client.get(f"/api/security/{sec_id}", params={"range": "all"}).json()
+    assert detail["price_history"][0]["t"] == "2019-04-01"
+
+    # 総資産は従来どおり、最初の取込の保有数（100株）で遡る。台帳なら
+    # 2021年は 60株。ALL は5年前から（そのときの株価は 2019年の 800円のまま）
+    total = client.get("/api/portfolio-history", params={"range": "all"}).json()
+    assert D(total["points"][0]["value"]) == D("100") * D("800")
 
 
 def test_portfolio_history_security_scope_validates_target(client, store):
