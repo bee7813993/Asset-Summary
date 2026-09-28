@@ -2586,17 +2586,8 @@ async function renderSecurityHistory() {
   } else if (data) {
     notes.push(..._historyNotes(data));
   }
-  // 口座間の移管でつないだ区間。どの口座からどの口座へかを断り、誤りなら直せるようにする
-  const moves = (data && data.transfers) || [];
-  if (moves.length) {
-    const lines = moves.map((m) => escapeHtml(t("label.transferNote", {
-      from: m.from_account, to: m.to_account, date: m.date,
-      qty: fmtAmount(m.quantity, _secQtyDigits),
-    })) + (m.origin === "auto" ? ` <span class="muted">${escapeHtml(t("tr.autoShort"))}</span>` : ""));
-    const manage = "#" + buildHash("manage", "transfers", { id: _secDetailId });
-    notes.push(lines.join("<br>") +
-      ` <a href="${escapeHtml(manage)}">${escapeHtml(t("label.transferManage"))}</a>`);
-  }
+  // 結び付いた移管そのものは警告ではないので、ここ（グラフの下の枠）には出さない
+  // （口座別内訳の下に小さく添える: renderSecTransferRoute）。
   // 移管先の最初の記録が、移ってきた数量より多い（残りは移管より前から持っていた扱い）。
   // 移管の後に買い足した分なら、取引に登録すれば買った日から数えられる
   ((data && data.transfer_remainders) || []).forEach((r) => {
@@ -2727,6 +2718,7 @@ async function showSecurityDetail(id, range) {
     if ((data.accounts || []).length === 0) {
       atbody.innerHTML = `<tr><td colspan="7" class="muted">${t("label.noData")}</td></tr>`;
     }
+    renderSecTransferRoute(data.transfers || []);
 
     // ロット一覧
     const ltbody = document.querySelector("#security-lots-table tbody");
@@ -5171,6 +5163,34 @@ async function loadTransfers() {
     if (hits.length) hits[0].scrollIntoView({ block: "center" });
     _transferFocusId = null;
   }
+}
+
+// ---- 銘柄詳細: 口座間の移管 ----
+
+/**
+ * 結び付いた移管（証券会社を移した履歴）を、口座別内訳の下に小さく添える。
+ * 警告でも対処の要るものでもないので、グラフの下の枠には出さない。誤りに
+ * 気づいたときのために、移管タブ（この銘柄の行）へのリンクを付ける。
+ */
+function renderSecTransferRoute(moves) {
+  const el = document.getElementById("sec-transfer-route");
+  if (!moves.length) {
+    el.innerHTML = "";
+    el.classList.add("hidden");
+    return;
+  }
+  const lines = [...moves]
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
+    .map((m) => escapeHtml(t("label.transferNote", {
+      from: m.from_account, to: m.to_account, date: m.date,
+      qty: fmtAmount(m.quantity, _secQtyDigits),
+    })) + (m.origin === "auto"
+      // 全角の括弧（「（自動）」）は前を空けない。英語の「(auto)」は空ける
+      ? (_lang === "en" ? " " : "") + escapeHtml(t("tr.autoShort")) : ""));
+  const manage = "#" + buildHash("manage", "transfers", { id: _secDetailId });
+  el.innerHTML = lines.join("<br>") +
+    `<br><a href="${escapeHtml(manage)}">${escapeHtml(t("label.transferManage"))}</a>`;
+  el.classList.remove("hidden");
 }
 
 // ---- 銘柄詳細: 移管先を決められなかった移管元（移管タブと同じ候補から選ぶ） ----

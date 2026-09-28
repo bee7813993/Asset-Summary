@@ -2154,6 +2154,10 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
             "cost_basis": cost_basis,
             "lot_events": cost_basis_events(store, security_id) if tx_count else [],
             "transaction_count": tx_count,
+            # 結び付いた移管（証券会社を移した履歴）。口座別内訳の下に小さく添える
+            "transfers": [
+                _ser_transfer_link(link, accounts, {security_id: sec}) for link in moves.links
+            ],
             # 自動では移管先を決められなかった移管元。銘柄詳細からも選べるように、
             # 移管タブ（/api/transfers の unresolved）と同じ形で返す
             "transfer_unresolved": [

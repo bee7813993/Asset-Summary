@@ -442,6 +442,11 @@ def test_security_detail_marks_the_account_it_moved_out_of(client, moved):
     assert (row["transferred_to"], row["transferred_on"]) == ("B証券", "2025-12-23")
     assert row["realized_pl"] in (None, "0")        # 移管は売却ではない
     assert not any(w["code"] == "CLOSED_POSITION" for w in row["warnings"])
+    # 結び付いた移管は銘柄詳細の応答にも載る（口座別内訳の下に小さく出す。
+    # 価格のグラフを表示していても出せるよう、推移の応答に頼らない）
+    (move,) = detail["transfers"]
+    assert (move["from_account"], move["to_account"], move["date"], move["origin"]) == (
+        "A証券", "B証券", "2025-12-23", "auto")
 
 
 def test_security_history_counts_backdated_transfer_ins_once(client, store, moved):
