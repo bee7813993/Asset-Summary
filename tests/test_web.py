@@ -545,6 +545,56 @@ def test_portfolio_history_security_scope_walks_back_through_the_ledger(client, 
     assert D(total["points"][0]["value"]) == D("100") * D("800")
 
 
+def test_security_all_range_ignores_older_records_of_other_assets(client, store):
+    """1銘柄の ALL は、その銘柄の記録・約定から決める（5年に満たなければ5年）。
+
+    何年も前に登録した別の資産（不動産など）の記録日まで広げると、その銘柄が
+    存在しない期間が延々と 0 で続く。総資産の ALL は従来どおり全資産の最古の記録から。
+    """
+    broker = store.get_or_create_account("マネー証券", kind="broker")
+    home = store.get_or_create_account("自宅", kind="other")
+    fund = store.create_security(
+        Security(name="全世界インデックス", name_key="ぜんせかいいんでっくす",
+                 asset_class=AssetClass.FUND_JP, unit=Unit.KUCHI, price_unit_divisor=10000,
+                 price_source_type=PriceSourceType.TOUSHIN, price_source_ref="JP9000:X",
+                 price_source_status=PriceSourceStatus.LINKED)
+    )
+    house = store.create_security(
+        Security(name="自宅マンション", name_key="じたくまんしょん",
+                 asset_class=AssetClass.REAL_ESTATE, unit=Unit.UNIT,
+                 price_source_status=PriceSourceStatus.MANUAL)
+    )
+    store.upsert_snapshot(
+        HoldingSnapshot(account_id=home.id, security_id=house, as_of_date=date(2013, 5, 17),
+                        quantity=D("1"), avg_cost=D("30000000"))
+    )
+    store.upsert_snapshot(
+        HoldingSnapshot(account_id=broker.id, security_id=fund, as_of_date=date(2026, 8, 4),
+                        quantity=D("100000"), avg_cost=D("20000"))
+    )
+    for day in ("2018-11-01", "2020-01-06", "2022-01-04", "2024-02-02", "2026-08-03"):
+        store.upsert_daily_price("toushin", "JP9000:X", day, D("20000"), "JPY")
+    store.create_batch(ImportBatch(id="tx-ledger", source_kind="broker_csv"))
+    store.insert_transactions(
+        [Transaction(dedup_key="b1", account_id=broker.id, security_id=fund,
+                     trade_date=date(2024, 2, 2), tx_type="buy", quantity=D("100000"),
+                     unit_price=D("20000"), gross_amount=D("200000"))],
+        batch_id="tx-ledger",
+    )
+    five_years_ago = date.today() - timedelta(days=365 * 5)
+
+    hist = client.get(
+        "/api/portfolio-history", params={"range": "all", "scope": f"security:{fund}"}
+    ).json()
+    assert hist["points"][0]["t"] == five_years_ago.isoformat()   # 2013 ではない
+    # 価格の推移も同じ範囲（それより前の価格はあっても出さない）
+    detail = client.get(f"/api/security/{fund}", params={"range": "all"}).json()
+    assert detail["price_history"][0]["t"] == "2022-01-04"
+
+    total = client.get("/api/portfolio-history", params={"range": "all"}).json()
+    assert total["points"][0]["t"] == "2013-05-17"
+
+
 def test_portfolio_history_security_scope_validates_target(client, store):
     assert client.get(
         "/api/portfolio-history", params={"scope": "security:abc"}

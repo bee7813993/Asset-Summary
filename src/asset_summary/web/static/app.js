@@ -3741,7 +3741,10 @@ document.getElementById("cb-recompute-btn").addEventListener("click", async () =
   note.textContent = "…";
   try {
     const res = await apiCall("/api/cost-basis/recompute", "POST", {});
-    note.textContent = t("tx.recomputeDone", { n: res.groups ?? res.recomputed ?? "" });
+    // 組 = 口座×銘柄。突き合わせられなかった組も再計算の対象には数える
+    note.textContent = t("tx.recomputeDone", {
+      n: (res.reconciled ?? 0) + (res.unreconciled ?? 0),
+    });
     // 表示中の銘柄詳細を読み直す
     if (_secDetailId != null) showSecurityDetail(_secDetailId, _secRange);
   } catch (e) {
@@ -3777,20 +3780,28 @@ function renderCostBasisCard(data, secCur, currency) {
 
   // 「取得単価を再計算した」と言い切れるのは全期間を覆えたときだけ。
   // 部分被覆では逆算の都合で MF と同じ値になるので、そこを正直に書く。
-  const primary = groups[0];
-  const explain = document.getElementById("cb-explain");
-  const key = {
+  // 被覆は口座ごとに違う（手動で登録した口座は全期間、履歴が途中からの口座は
+  // 一部期間など）ので、説明も口座ごとに出す。先頭の口座だけで書くと、他の口座
+  // まで「すべて説明できています」と読めてしまう。全口座が同じ文なら1つにまとめる
+  const explainKeys = {
     full: "tx.explainFull",
     partial: "tx.explainPartial",
     partial_uncosted: "tx.explainPartialUncosted",
     unreconciled: "tx.explainUnreconciled",
-  }[primary.coverage];
-  explain.textContent = key
-    ? t(key, {
-        covered: fmtAmount(primary.covered_quantity, _secQtyDigits),
-        residual: fmtAmount(primary.residual_quantity, _secQtyDigits),
-      })
-    : "";
+  };
+  const explains = groups
+    .filter((g) => explainKeys[g.coverage])
+    .map((g) => ({
+      account: g.account || "",
+      text: t(explainKeys[g.coverage], {
+        covered: fmtAmount(g.covered_quantity, _secQtyDigits),
+        residual: fmtAmount(g.residual_quantity, _secQtyDigits),
+      }),
+    }));
+  const explain = document.getElementById("cb-explain");
+  explain.innerHTML = explains.every((e) => e.text === explains[0].text)
+    ? escapeHtml(explains.length ? explains[0].text : "")
+    : explains.map((e) => `${escapeHtml(e.account)}: ${escapeHtml(e.text)}`).join("<br>");
 
   const warnings = groups.flatMap((g) => (g.warnings || []).map((w) => w.message));
   renderWarningsInto(document.getElementById("cb-warnings"), warnings);

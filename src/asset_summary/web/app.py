@@ -787,7 +787,12 @@ def _range_start(
     end: date,
     first_trade: date | None = None,
 ) -> date:
-    """表示範囲の開始日。ALL は5年前と最古の記録（取引履歴を渡せば最初の約定）の早いほう。"""
+    """表示範囲の開始日。ALL は5年前と最古の記録（取引履歴を渡せば最初の約定）の早いほう。
+
+    1銘柄のグラフには、その銘柄のスナップショットだけを渡すこと。全資産のものを
+    渡すと、何年も前に登録した別の資産（不動産など）の記録日まで広がり、その銘柄が
+    存在しない期間が延々と続く。
+    """
     if range_key == "all":
         five_years_ago = end - timedelta(days=365 * 5)
         oldest = min((s.as_of_date for s in snapshots), default=five_years_ago)
@@ -1642,6 +1647,7 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
         # 総資産・クラス・口座では使わない — 現金の出入りは台帳に無いので、
         # 株だけ過去へ戻すと「現金で買った」ことが資産の増加に見えてしまう
         scope_txs: list[Any] = []
+        range_snapshots = snapshots
         if scope_t is not None and scope_t[0] == "security":
             sec_id = _to_int(scope_t[1], "security")
             if sec_id not in secs:
@@ -1649,6 +1655,7 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
             scope_t = ("security", str(sec_id))
             priced_secs = {sec_id: secs[sec_id]}
             scope_txs = store.list_transactions(security_id=sec_id)
+            range_snapshots = [s for s in snapshots if s.security_id == sec_id]
         # タグ・Myポートフォリオは「銘柄の集合」ではなく「銘柄ごとの計上率」で
         # 決まるので、daily_series には scope ではなく重みを渡す
         ratio_by_security: dict[Any, Decimal] | None = None
@@ -1668,7 +1675,7 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
         accounts = {a.id: a for a in store.list_accounts()}
         end = date.today()
         start = _range_start(
-            range_key, snapshots, end,
+            range_key, range_snapshots, end,
             first_trade=scope_txs[0].trade_date if scope_txs else None,
         )
 
@@ -1892,10 +1899,12 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
         tx_count = store.count_transactions(security_id=security_id)
 
         end = date.today()
-        # ALL は取引履歴の最初の約定まで（評価額・保有数の推移と同じ範囲にそろえる）
+        # ALL はこの銘柄の最初の記録・約定まで（評価額・保有数の推移と同じ範囲にそろえる）
         first_tx = store.list_transactions(security_id=security_id, limit=1)
         start = _range_start(
-            range_key, store.all_snapshots(), end,
+            range_key,
+            [s for s in store.all_snapshots() if s.security_id == security_id],
+            end,
             first_trade=first_tx[0].trade_date if first_tx else None,
         )
         if sec.price_source_status == PriceSourceStatus.LINKED:
