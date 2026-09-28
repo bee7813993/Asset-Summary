@@ -27,6 +27,14 @@ def _nonempty(cells: list[str]) -> list[str]:
     return [c for c in cells if c and c.strip()]
 
 
+def _extent(cells: list[str]) -> int:
+    """最後の空でないセルまでの幅（途中の空欄も数える）。"""
+    for i in range(len(cells) - 1, -1, -1):
+        if cells[i] and cells[i].strip():
+            return i + 1
+    return 0
+
+
 def _modal_width(grid: SheetGrid) -> int:
     freq: dict[int, int] = {}
     for row in grid.rows:
@@ -206,7 +214,11 @@ def find_region(grid: SheetGrid, universe) -> TableRegion:
     else:
         header_row = best_row
         header_rows = (best_row,)
-        headers = tuple(_cells(grid, best_row)[:modal_width])
+        # 見出しは行の最後の見出しまで取る。modal_width は「空でないセルの数」で、
+        # 表の幅ではない — 途中に空欄の多いデータ行（口座区分が空欄のマネックス
+        # など）では幅を少なく見積もり、後ろの列（受渡金額など）の見出しを落とす
+        width = max(modal_width, _extent(_cells(grid, best_row)))
+        headers = tuple(_cells(grid, best_row)[:width])
         data_start = best_row + 1
 
         # 2 行に割れたヘッダ（'約定' / '日' が上下に分かれている等）。
@@ -217,7 +229,10 @@ def find_region(grid: SheetGrid, universe) -> TableRegion:
         if best_row + 1 < grid.height:
             nxt = score_header_row(grid, best_row + 1, modal_width, universe)
             if nxt >= HEADER_JOIN_SCORE:
-                joined = _join_two_rows(grid, best_row, best_row + 1, modal_width)
+                joined = _join_two_rows(
+                    grid, best_row, best_row + 1,
+                    max(width, _extent(_cells(grid, best_row + 1))),
+                )
                 if _vocab_strength(joined) > base_strength:
                     headers = tuple(joined)
                     header_rows = (best_row, best_row + 1)
@@ -226,7 +241,10 @@ def find_region(grid: SheetGrid, universe) -> TableRegion:
         if header_rows == (best_row,) and best_row > 0 and _is_partial_header(
             _cells(grid, best_row - 1), len(_nonempty(list(headers)))
         ):
-            joined = _join_two_rows(grid, best_row - 1, best_row, modal_width)
+            joined = _join_two_rows(
+                grid, best_row - 1, best_row,
+                max(width, _extent(_cells(grid, best_row - 1))),
+            )
             if _vocab_strength(joined) >= base_strength:
                 headers = tuple(joined)
                 header_rows = (best_row - 1, best_row)
