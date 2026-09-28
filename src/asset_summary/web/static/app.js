@@ -51,7 +51,7 @@ function _loadChoice(storageKey, allowed, fallback) {
   return allowed.includes(saved) ? saved : fallback;
 }
 let _secMetric = _loadChoice("as_sec_metric", ["price", "value", "quantity"], "price");
-let _csAssetMetric = _loadChoice("as_cs_metric", ["value", "quantity"], "value");
+let _csAssetMetric = _loadChoice("as_cs_metric", ["price", "value", "quantity"], "value");
 
 // 詳細ページの現在対象
 let _classDetailId = null;
@@ -62,12 +62,13 @@ let _secDetailId = null;
 let _secPrice = null;       // {history, avgCost, currency}
 let _secHoldHist = null;    // {key, data}
 let _secHistReq = 0;        // 待つ間に表示対象が変わったら古い応答で描かない
+let _secQtyDigits = 4;      // 表示中の銘柄の数量の小数桁（qtyDigits。既定は QTY_DIGITS と同じ）
 
 // Crypto-Summary 連携（コイン別サブビュー）
 let _csAssetSym = null;
 let _csAssetRange = localStorage.getItem("as_cs_range") || "90d";
 let _csAssetChart = null;
-let _csAssetHist = null;    // {points, currency} — 評価額と保有数を同じ点列から描く
+let _csAssetHist = null;    // {points, quantityPoints, pricePoints, currency} — 評価額・保有数・価格の点列
 let _csCoinIcons = null;    // {SYM: url} — 起動時に一度だけ取得
 
 // キャッシュ
@@ -125,15 +126,19 @@ function fmtMoney(value, currency) {
   return sym + n.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits });
 }
 
-// 単価用: JPYでも小数を保持（基準価額・平均取得単価など）
+// 単価用: JPYでも小数を保持（基準価額・平均取得単価など）。
+// 1 未満は有効数字 4 桁で出す。暗号資産には 1 未満の価格（DOGE の $0.1234、
+// SHIB の ¥0.001935 など）が多く、小数の桁数で切ると 0 に潰れる
+// （Crypto-Summary の fmtPrice と同じ規則。1 以上は従来どおり）
 function fmtPrice(value, currency) {
   if (value === null || value === undefined || value === "") return "—";
   if (maskAmounts) return (CURRENCY_SYMBOL[currency] || "") + "●●●●●";
   const n = Number(value);
   if (!isFinite(n)) return "—";
-  const maxDigits = currency === "JPY" ? 2 : 4;
-  return (CURRENCY_SYMBOL[currency] || "") +
-    n.toLocaleString(undefined, { maximumFractionDigits: maxDigits });
+  const digits = n !== 0 && Math.abs(n) < 1
+    ? { maximumSignificantDigits: 4 }
+    : { maximumFractionDigits: currency === "JPY" ? 2 : 4 };
+  return (CURRENCY_SYMBOL[currency] || "") + n.toLocaleString(undefined, digits);
 }
 
 // JPY 専用: 億・万・円 のサブ表示
@@ -180,21 +185,31 @@ function fmtMoneyShort(value, currency) {
   return fmtMoney(value, currency);
 }
 
-function fmtAmount(value) {
+// 数量の小数の桁数。株数・口数・グラムは 4 桁で足りる（それより細かいのは端数の
+// ノイズ）。暗号資産は 1 枚が高く 0.0001 未満にも意味があるので 8 桁まで出す
+// （Crypto-Summary の表示と同じ。BTC の最小単位 1 satoshi は 0.00000001）
+const QTY_DIGITS = 4;
+const CRYPTO_QTY_DIGITS = 8;
+
+function qtyDigits(assetClass) {
+  return assetClass === "crypto" ? CRYPTO_QTY_DIGITS : QTY_DIGITS;
+}
+
+function fmtAmount(value, digits = QTY_DIGITS) {
   if (value === null || value === undefined || value === "") return "—";
   if (maskAmounts) return "●●●●●";
   const n = Number(value);
   if (!isFinite(n)) return "—";
-  return n.toLocaleString(undefined, { maximumFractionDigits: 4 });
+  return n.toLocaleString(undefined, { maximumFractionDigits: digits });
 }
 
 // 狭い画面の縦軸用: 桁の大きい数量を「144万」「1.4M」に畳む（fmtMoneyShort の数量版）
-function fmtAmountShort(value) {
+function fmtAmountShort(value, digits = QTY_DIGITS) {
   const n = Number(value);
   if (maskAmounts || value === null || value === undefined || value === "" || !isFinite(n)) {
-    return fmtAmount(value);
+    return fmtAmount(value, digits);
   }
-  if (Math.abs(n) < 10_000) return fmtAmount(value);
+  if (Math.abs(n) < 10_000) return fmtAmount(value, digits);
   return n.toLocaleString(undefined, { notation: "compact", maximumFractionDigits: 1 });
 }
 
@@ -786,6 +801,7 @@ function renderHoldingsRows(tbody, holdings, currency, opts = {}) {
   }
   holdings.forEach((h) => {
     const isCS = h.origin === "crypto_summary";
+    const qd = qtyDigits(h.asset_class);
     const tr = document.createElement("tr");
     tr.className = "clickable" + (h.in_total === false ? " row-dim" : "");
     const refBadge = h.has_price === false && h.value != null
@@ -801,13 +817,13 @@ function renderHoldingsRows(tbody, holdings, currency, opts = {}) {
     // 銘柄単位に合算した行は口座が「A 他N件」表示になる。内訳は title で補う
     const accts = Array.isArray(h.accounts) ? h.accounts : [];
     const acctTitle = accts.length > 1
-      ? accts.map((a) => `${a.account}: ${fmtAmount(a.quantity)}`).join("\n")
+      ? accts.map((a) => `${a.account}: ${fmtAmount(a.quantity, qd)}`).join("\n")
       : "";
     const acctAttr = acctTitle ? ` title="${escapeHtml(acctTitle)}"` : "";
     // スマホ縦持ち用の数量サブ表示（CSSで切替。横持ち・PCは数量の列で出す）。
     // 現金・不動産など数量が常に1の行では出さない（ノイズになるだけのため）
     const qtySub = h.quantity != null && Number(h.quantity) !== 1
-      ? `<span class="qty-sub">${escapeHtml(t("th.quantity"))} ${fmtAmount(h.quantity)}</span>`
+      ? `<span class="qty-sub">${escapeHtml(t("th.quantity"))} ${fmtAmount(h.quantity, qd)}</span>`
       : "";
     // 価格変動しない資産（現金・ポイント・年金 = 価格取得が不要）は、カードでは
     // 現在値〜評価損益の行を出さない（全部「—」の行が並ぶだけのため）。
@@ -830,7 +846,7 @@ function renderHoldingsRows(tbody, holdings, currency, opts = {}) {
         </span>${qtySub}
       </td>
       <td${acctAttr}>${escapeHtml(h.account || "")}</td>
-      <td class="num"${qtyLabel}>${fmtAmount(h.quantity)}</td>
+      <td class="num"${qtyLabel}>${fmtAmount(h.quantity, qd)}</td>
       <td class="num">${fmtPrice(h.avg_cost, h.currency || currency)}</td>
       <td class="num"${fluctLabel(`${t("th.currentPrice")}（${t("th.avgCost")}）`)}>
         <span class="price-plain">${fmtPrice(h.price, h.currency || currency)}</span>
@@ -848,7 +864,7 @@ function renderHoldingsRows(tbody, holdings, currency, opts = {}) {
     });
     _appendDetailToggle(tr, [
       { label: t("th.account"), value: escapeHtml(h.account || "") },
-      { label: t("th.quantity"), value: fmtAmount(h.quantity) },
+      { label: t("th.quantity"), value: fmtAmount(h.quantity, qd) },
       { label: t("th.avgCost"), value: fmtPrice(h.avg_cost, h.currency || currency) },
       { label: t("th.currentPrice"), value: fmtPrice(h.price, h.currency || currency) },
       { label: t("th.dayChange"), value: dayChangeCellHtml(h, currency) },
@@ -862,6 +878,7 @@ function renderHoldingsRows(tbody, holdings, currency, opts = {}) {
 
 // opts.metric: "value"（評価額・既定）| "quantity"（保有数）。保有数の点を
 // 持つのは1銘柄の推移（銘柄詳細・CS コイン詳細）だけ。
+// opts.digits: 保有数の小数の桁数（既定 QTY_DIGITS。暗号資産は CRYPTO_QTY_DIGITS）
 function renderHistoryChart(canvasId, points, currency, existingChart, opts = {}) {
   const canvas = document.getElementById(canvasId);
   if (!canvas) return null;
@@ -869,10 +886,11 @@ function renderHistoryChart(canvasId, points, currency, existingChart, opts = {}
 
   const emptyEl = canvas.parentElement.querySelector(".history-empty");
   const isQty = opts.metric === "quantity";
-  // 保有数を返さない点（balance を返さない旧 CS など）は描けないので落とす
-  const rows = isQty
-    ? (points || []).filter((p) => p.quantity != null && p.quantity !== "")
-    : (points || []);
+  const digits = opts.digits || QTY_DIGITS;
+  // 値の無い点（保有数を返さない旧 CS の点など）は描けないので落とす。
+  // Number(null) は 0 なので、残すと線がその日だけ 0 に落ちる
+  const key = isQty ? "quantity" : "value";
+  const rows = (points || []).filter((p) => p[key] != null && p[key] !== "");
 
   if (rows.length < 2) {
     canvas.style.display = "none";
@@ -883,7 +901,7 @@ function renderHistoryChart(canvasId, points, currency, existingChart, opts = {}
   if (emptyEl) emptyEl.classList.add("hidden");
 
   const labels = rows.map((p) => p.t);
-  const values = rows.map((p) => Number(isQty ? p.quantity : p.value));
+  const values = rows.map((p) => Number(p[key]));
 
   // 狭い描画域（スマホ縦持ちなど）では日付を "MM-DD" に短縮し、本数も減らす。
   // フル表記のままだと "2026-08-17" が隣とくっついて読めない。完全な日付は
@@ -928,7 +946,7 @@ function renderHistoryChart(canvasId, points, currency, existingChart, opts = {}
       };
     }
   }
-  const fmtY = (v) => (isQty ? fmtAmount(v) : fmtMoney(v, currency));
+  const fmtY = (v) => (isQty ? fmtAmount(v, digits) : fmtMoney(v, currency));
 
   return new Chart(canvas, {
     type: "line",
@@ -960,7 +978,7 @@ function renderHistoryChart(canvasId, points, currency, existingChart, opts = {}
             color: th.tick,
             font: { size: 11 },
             callback(v) {
-              if (isQty) return narrow ? fmtAmountShort(v) : fmtAmount(v);
+              if (isQty) return narrow ? fmtAmountShort(v, digits) : fmtAmount(v, digits);
               return narrow ? fmtMoneyShort(v, currency) : fmtMoney(v, currency);
             },
           },
@@ -1953,7 +1971,8 @@ async function showCsAssetDetail(sym, range) {
     const data = await fetchJSON(
       `/api/crypto-summary/asset/${encodeURIComponent(sym)}?currency=${currency}&range=${_csAssetRange}`
     );
-    document.getElementById("cs-tile-balance").textContent = fmtAmount(data.balance);
+    document.getElementById("cs-tile-balance").textContent =
+      fmtAmount(data.balance, CRYPTO_QTY_DIGITS);
     document.getElementById("cs-tile-price").textContent = fmtPrice(data.price, currency);
     document.getElementById("cs-tile-value").textContent = fmtMoney(data.value, currency);
     document.getElementById("cs-tile-day-change").innerHTML = dayChangeCellHtml(data, currency);
@@ -1963,14 +1982,20 @@ async function showCsAssetDetail(sym, range) {
       )}</span>`;
     }
 
-    _csAssetHist = { points: (data.history || {}).points || [], currency };
+    const hist = data.history || {};
+    _csAssetHist = {
+      points: hist.points || [],
+      quantityPoints: hist.quantity_points || [],
+      pricePoints: hist.price_points || [],
+      currency,
+    };
     renderCsAssetHistory();
 
     (data.accounts || []).forEach((a) => {
       const tr = document.createElement("tr");
       tr.innerHTML = `
         <td>${escapeHtml(a.account || "")}</td>
-        <td class="num">${fmtAmount(a.balance)}</td>
+        <td class="num">${fmtAmount(a.balance, CRYPTO_QTY_DIGITS)}</td>
         <td class="num">${fmtMoney(a.value, currency)}</td>
       `;
       tbody.appendChild(tr);
@@ -1993,25 +2018,40 @@ async function showCsAssetDetail(sym, range) {
 }
 
 /**
- * CS コイン詳細の推移を、選んでいる表示対象（評価額・保有数）で描く。
- * 保有数は CS がコイン別の推移に載せるその日の残高（AS 側で quantity に改名済み）。
- * どちらも同じ点列から描くので、切替では取り直さない。
+ * CS コイン詳細の推移を、選んでいる表示対象（価格・評価額・保有数）で描く。
+ * 保有数は CS の metric=balance の日次の保有数量（古い CS では評価額の点に
+ * 付いた残高）、価格は metric=price の日次終値（古い CS には無い）。点の並ぶ日が
+ * それぞれ違う（価格の無い日も保有数は欠けず、価格は持つ前の日にもある）ので
+ * 別々の点列で受け取る。どれも読み込み時に取得済みなので切替では取り直さない。
  */
 function renderCsAssetHistory() {
   _syncCsAssetHistoryHeader();
   const h = _csAssetHist || {};
+  const currency = h.currency || currentCurrency();
+  if (_csAssetMetric === "price") {
+    // CS には平均取得単価が無いので、銘柄詳細にある取得単価の破線は引かない
+    _csAssetChart = renderPriceChart(
+      "cs-asset-history-chart", h.pricePoints || [], null, currency, _csAssetChart
+    );
+    return;
+  }
+  const isQty = _csAssetMetric === "quantity";
   _csAssetChart = renderHistoryChart(
-    "cs-asset-history-chart", h.points || [], h.currency || currentCurrency(),
-    _csAssetChart, { metric: _csAssetMetric }
+    "cs-asset-history-chart", (isQty ? h.quantityPoints : h.points) || [],
+    currency, _csAssetChart, { metric: _csAssetMetric, digits: CRYPTO_QTY_DIGITS }
   );
 }
 
-/** 表示対象タブと見出し（読み込みを待たずに合わせる。既定以外を記憶しているとき用）。 */
+/** 表示対象タブ・見出し・空のときの文言（読み込みを待たずに合わせる。既定以外を記憶しているとき用）。 */
 function _syncCsAssetHistoryHeader() {
   _setMetricActive("cs-asset-metric-tabs", _csAssetMetric);
   _setI18nText(
-    document.getElementById("cs-asset-history-title"),
-    _csAssetMetric === "quantity" ? "label.quantityHistorySection" : "label.valueHistorySection"
+    document.getElementById("cs-asset-history-title"), _HISTORY_METRIC_TITLE[_csAssetMetric]
+  );
+  // 価格が無いのと推移が無いのは別の理由なので、空のときの文言も分ける
+  _setI18nText(
+    document.getElementById("cs-asset-history-chart").parentElement.querySelector(".history-empty"),
+    _csAssetMetric === "price" ? "label.noPriceData" : "label.noHistData"
   );
 }
 
@@ -2345,16 +2385,17 @@ wireSortableTable("pf-holdings-table", _pfSort, () => renderPortfolioDetail(_pfD
 
 // ---- 銘柄詳細 ----
 
-function renderPriceChart(priceHistory, avgCost, currency) {
-  const canvas = document.getElementById("price-chart");
-  if (!canvas) return;
-  if (_priceChart) { _priceChart.destroy(); _priceChart = null; }
+// 価格の推移（銘柄詳細・CS コイン詳細）。avgCost を渡すと平均取得単価の水平破線を引く
+function renderPriceChart(canvasId, priceHistory, avgCost, currency, existingChart) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return null;
+  if (existingChart) existingChart.destroy();
 
   const emptyEl = canvas.parentElement.querySelector(".history-empty");
   if (!priceHistory || priceHistory.length < 2) {
     canvas.style.display = "none";
     if (emptyEl) emptyEl.classList.remove("hidden");
-    return;
+    return null;
   }
   canvas.style.display = "";
   if (emptyEl) emptyEl.classList.add("hidden");
@@ -2409,7 +2450,7 @@ function renderPriceChart(priceHistory, avgCost, currency) {
     });
   }
 
-  _priceChart = new Chart(canvas, {
+  return new Chart(canvas, {
     type: "line",
     data: { labels, datasets },
     options: {
@@ -2461,7 +2502,7 @@ function renderPriceChart(priceHistory, avgCost, currency) {
   });
 }
 
-const _SEC_METRIC_TITLE = {
+const _HISTORY_METRIC_TITLE = {
   price: "label.priceHistorySection",
   value: "label.valueHistorySection",
   quantity: "label.quantityHistorySection",
@@ -2470,7 +2511,7 @@ const _SEC_METRIC_TITLE = {
 /** 表示対象タブ・見出し・空のときの文言（読み込みを待たずに合わせる）。 */
 function _syncSecHistoryHeader() {
   _setMetricActive("sec-metric-tabs", _secMetric);
-  _setI18nText(document.getElementById("sec-history-title"), _SEC_METRIC_TITLE[_secMetric]);
+  _setI18nText(document.getElementById("sec-history-title"), _HISTORY_METRIC_TITLE[_secMetric]);
   _setI18nText(
     document.getElementById("price-chart").parentElement.querySelector(".history-empty"),
     _secMetric === "price" ? "label.noPriceData" : "label.noHistData"
@@ -2493,7 +2534,7 @@ async function renderSecurityHistory() {
 
   if (metric === "price") {
     const p = _secPrice || {};
-    renderPriceChart(p.history || [], p.avgCost, p.currency);
+    _priceChart = renderPriceChart("price-chart", p.history || [], p.avgCost, p.currency, _priceChart);
     return;
   }
 
@@ -2518,7 +2559,8 @@ async function renderSecurityHistory() {
 
   const points = (data && data.points) || [];
   _priceChart = renderHistoryChart(
-    "price-chart", points, (data && data.currency) || currency, _priceChart, { metric }
+    "price-chart", points, (data && data.currency) || currency, _priceChart,
+    { metric, digits: _secQtyDigits }
   );
   const notes = [];
   if (metric === "quantity") {
@@ -2582,6 +2624,7 @@ async function showSecurityDetail(id, range) {
   // 取込のあとに開き直したときは取り直す）
   _secPrice = null;
   _secHoldHist = null;
+  _secQtyDigits = QTY_DIGITS;
   _syncSecHistoryHeader();
 
   const currency = currentCurrency();
@@ -2592,6 +2635,7 @@ async function showSecurityDetail(id, range) {
       `/api/security/${encodeURIComponent(id)}?currency=${currency}&range=${_secRange}`
     );
     const sec = data.security || {};
+    _secQtyDigits = qtyDigits(sec.asset_class);
 
     document.getElementById("security-detail-name").textContent = sec.name || "";
     const meta = document.getElementById("security-detail-meta");
@@ -2604,7 +2648,7 @@ async function showSecurityDetail(id, range) {
     // 統計タイル
     const tiles = data.tiles || {};
     const secCur = sec.currency || currency;
-    document.getElementById("tile-quantity").textContent = fmtAmount(tiles.quantity);
+    document.getElementById("tile-quantity").textContent = fmtAmount(tiles.quantity, _secQtyDigits);
     document.getElementById("tile-avg-cost").textContent = fmtPrice(tiles.avg_cost, secCur);
     document.getElementById("tile-price").textContent = fmtPrice(tiles.price, secCur);
     document.getElementById("tile-value").innerHTML =
@@ -2631,7 +2675,7 @@ async function showSecurityDetail(id, range) {
       const tr = document.createElement("tr");
       tr.innerHTML = `
         <td>${escapeHtml(a.account)}</td>
-        <td class="num">${fmtAmount(a.quantity)}</td>
+        <td class="num">${fmtAmount(a.quantity, _secQtyDigits)}</td>
         <td class="num">${fmtPrice(a.avg_cost, secCur)}</td>
         <td class="num">${fmtMoney(a.value, currency)}</td>
         <td class="num">${dayChangeCellHtml(a, currency)}</td>
@@ -2653,7 +2697,7 @@ async function showSecurityDetail(id, range) {
         <td>${escapeHtml(l.account)}</td>
         <td>${l.lot_seq != null ? l.lot_seq : ""}</td>
         <td>${escapeHtml(l.lot_label || "")}</td>
-        <td class="num">${fmtAmount(l.quantity)}</td>
+        <td class="num">${fmtAmount(l.quantity, _secQtyDigits)}</td>
         <td class="num">${fmtPrice(l.avg_cost, secCur)}</td>
         <td>${escapeHtml(l.acquired_on || "—")}</td>
         <td>${escapeHtml(l.as_of || "")}</td>
@@ -3721,8 +3765,8 @@ function renderCostBasisCard(data, secCur, currency) {
     tr.innerHTML = `
       <td>${escapeHtml(g.account || "")}</td>
       <td>${coverageBadgeHtml(g.coverage)}</td>
-      <td class="num">${fmtAmount(g.covered_quantity)}</td>
-      <td class="num">${fmtAmount(g.residual_quantity)}</td>
+      <td class="num">${fmtAmount(g.covered_quantity, _secQtyDigits)}</td>
+      <td class="num">${fmtAmount(g.residual_quantity, _secQtyDigits)}</td>
       <td class="num">${fmtPrice(g.residual_avg_cost, secCur)}</td>
       <td>${escapeHtml(g.acquired_on || "—")}</td>
       <td class="num">${plAmountHtml(g.realized_pl, currency)}</td>
@@ -3743,8 +3787,8 @@ function renderCostBasisCard(data, secCur, currency) {
   }[primary.coverage];
   explain.textContent = key
     ? t(key, {
-        covered: fmtAmount(primary.covered_quantity),
-        residual: fmtAmount(primary.residual_quantity),
+        covered: fmtAmount(primary.covered_quantity, _secQtyDigits),
+        residual: fmtAmount(primary.residual_quantity, _secQtyDigits),
       })
     : "";
 
@@ -3781,7 +3825,7 @@ async function loadTransactionHistory(securityId, secCur, currency, append) {
       <td>${escapeHtml(txTypeLabel(tx.tx_type))}${tx.origin === "manual"
         ? ` <span class="ref-badge" title="${escapeHtml(tx.note || "")}">${t("tx.manualBadge")}</span>` : ""}</td>
       <td>${escapeHtml(tx.account || "")}</td>
-      <td class="num">${fmtAmount(tx.quantity)}</td>
+      <td class="num">${fmtAmount(tx.quantity, _secQtyDigits)}</td>
       <td class="num">${fmtPrice(tx.unit_price, secCur)}</td>
       <td class="num">${fmtMoney(tx.net_amount, tx.currency || currency)}</td>
       <td>${escapeHtml(tx.lot_label || "")}</td>
@@ -4023,7 +4067,7 @@ function renderManageClassList(tab, classes, holdings, currency) {
     tr.innerHTML =
       `<td>${escapeHtml(h.name)}</td>` +
       `<td>${escapeHtml(h.account || "")}</td>` +
-      `<td class="num">${fmtAmount(h.quantity)}${h.unit === "gram" ? " g" : ""}</td>` +
+      `<td class="num">${fmtAmount(h.quantity, qtyDigits(h.asset_class))}${h.unit === "gram" ? " g" : ""}</td>` +
       `<td class="num">${fmtMoney(h.value, currency)}</td>` +
       `<td>${escapeHtml(h.as_of || "")}</td>`;
     const td = document.createElement("td");
@@ -4494,7 +4538,7 @@ async function loadManageHoldings() {
         <td>${escapeHtml(name)}</td>
         <td>${escapeHtml(account)}</td>
         <td>${escapeHtml(h.lot_label || "")}</td>
-        <td class="num">${fmtAmount(h.quantity)}</td>
+        <td class="num">${fmtAmount(h.quantity, qtyDigits(sec.asset_class))}</td>
         <td class="num">${fmtAmount(h.avg_cost)}</td>
         <td>${escapeHtml(asOf)}</td>
         <td class="num"><button class="delete-btn" title="${t("btn.delete")}">✕ ${t("btn.delete")}</button></td>
@@ -4555,15 +4599,18 @@ async function loadManualTransactions() {
     const data = await fetchJSON("/api/transactions/manual");
     const rows = data.transactions || [];
     tbody.innerHTML = "";
+    const classById = {};
+    _securities.forEach((s) => { classById[s.id] = s.asset_class; });
     rows.forEach((tx) => {
       const type = txTypeLabel(tx.tx_type);
+      const qd = qtyDigits(classById[tx.security_id]);
       const tr = document.createElement("tr");
       tr.innerHTML = `
         <td>${escapeHtml(tx.trade_date)}</td>
         <td>${escapeHtml(tx.account || "")}</td>
         <td>${escapeHtml(tx.security || "")}</td>
         <td>${escapeHtml(type)}</td>
-        <td class="num">${fmtAmount(tx.quantity)}</td>
+        <td class="num">${fmtAmount(tx.quantity, qd)}</td>
         <td class="num" title="${escapeHtml(tx.note || "")}">${fmtPrice(tx.unit_price, tx.currency)}</td>
         <td class="num">${fmtMoney(tx.net_amount, tx.currency)}</td>
         <td class="num"><button class="delete-btn" title="${t("btn.delete")}">✕ ${t("btn.delete")}</button></td>
@@ -4573,7 +4620,7 @@ async function loadManualTransactions() {
           t("manage.txDeleteTitle"),
           t("manage.txDeleteMsg", {
             date: tx.trade_date, account: tx.account || "", name: tx.security || "",
-            type, quantity: fmtAmount(Math.abs(Number(tx.quantity))),
+            type, quantity: fmtAmount(Math.abs(Number(tx.quantity)), qd),
           }),
           async () => {
             await apiCall(`/api/transactions/${encodeURIComponent(tx.id)}`, "DELETE");

@@ -412,37 +412,137 @@ def test_cs_status_disabled(client, monkeypatch):
     }
 
 
-def test_cs_asset_detail(client, monkeypatch):
-    def fake_accounts(asset, currency, user_sub, warn=None):
-        assert asset == "BTC"
-        return {
-            "asset": "BTC",
-            "price": "15000000",
-            "total_balance": "0.3",
-            "total_value": "4500000",
-            "accounts": [{"account": "bitFlyer", "balance": "0.3", "value": "4500000"}],
-        }
+def _fake_cs_accounts(asset, currency, user_sub, warn=None):
+    assert asset == "BTC"
+    return {
+        "asset": "BTC",
+        "price": "15000000",
+        "total_balance": "0.3",
+        "total_value": "4500000",
+        "accounts": [{"account": "bitFlyer", "balance": "0.3", "value": "4500000"}],
+    }
 
-    def fake_history(currency, range_key, scope, user_sub, warn=None):
+
+def _patch_cs_asset_history(
+    monkeypatch, value_points, balance_points=None, calls=None, price_points=None
+):
+    """コイン別の推移。balance_points=None は metric を知らない古い CS。
+
+    古い CS は metric を無視して評価額の応答（metric キー無し）を返す。
+    新しい CS は metric=balance / price にそれぞれの系列を返す。
+    """
+
+    def fake(currency, range_key, scope, user_sub, warn=None, metric=None):
         assert scope == "asset:BTC"
-        return {
-            "points": [{"t": "2026-08-01", "value": "4400000", "balance": "0.25"}],
-            "is_partial": False,
-        }
+        if calls is not None:
+            calls.append((range_key, metric))
+        if balance_points is not None and metric == "balance":
+            return {"metric": "balance", "points": balance_points, "is_partial": False}
+        if balance_points is not None and metric == "price":
+            return {"metric": "price", "points": price_points or [], "is_partial": False}
+        if value_points is None:
+            return None
+        return {"points": value_points, "is_partial": False}
 
-    monkeypatch.setattr(web_app, "fetch_cs_asset_accounts", fake_accounts)
-    monkeypatch.setattr(web_app, "fetch_cs_history", fake_history)
+    monkeypatch.setattr(web_app, "fetch_cs_asset_accounts", _fake_cs_accounts)
+    monkeypatch.setattr(web_app, "fetch_cs_history", fake)
+
+
+def test_cs_asset_detail(client, monkeypatch):
+    calls: list = []
+    _patch_cs_asset_history(
+        monkeypatch,
+        [
+            {"t": "2026-08-01", "value": "4400000", "balance": "0.25"},
+            {"t": "2026-08-03", "value": "4500000", "balance": "0.3"},
+        ],
+        [
+            {"t": "2026-08-01", "balance": "0.25"},
+            {"t": "2026-08-02", "balance": "0.25"},   # 価格が無く評価額の点が無い日
+            {"t": "2026-08-03", "balance": "0.3"},
+        ],
+        calls,
+        price_points=[
+            {"t": "2026-07-30", "price": "14000000"},   # 持つ前の日の価格も出る
+            {"t": "2026-08-01", "price": "14600000"},
+            {"t": "2026-08-03", "price": "15000000"},
+        ],
+    )
 
     data = client.get("/api/crypto-summary/asset/btc?range=30d").json()
     assert data["asset"] == "BTC"  # 大文字に正規化
     assert data["balance"] == "0.3"
     assert data["value"] == "4500000"
     assert data["accounts"][0]["account"] == "bitFlyer"
-    assert data["history"]["points"][0]["value"] == "4400000"
-    # その日の残高は保有数として渡す（評価額⇔保有数の切替用）
-    assert data["history"]["points"][0]["quantity"] == "0.25"
+    # 評価額と保有数は別の配列（日付で1本にまとめると評価額が null の日ができる）
+    assert data["history"]["points"] == [
+        {"t": "2026-08-01", "value": "4400000"},
+        {"t": "2026-08-03", "value": "4500000"},
+    ]
+    # 保有数は metric=balance の系列から（価格の無い 8/2 も欠けない）
+    assert data["history"]["quantity_points"] == [
+        {"t": "2026-08-01", "quantity": "0.25"},
+        {"t": "2026-08-02", "quantity": "0.25"},
+        {"t": "2026-08-03", "quantity": "0.3"},
+    ]
+    # 価格は metric=price の系列から（保有と関係なくレンジの開始日から）
+    assert data["history"]["price_points"] == [
+        {"t": "2026-07-30", "price": "14000000"},
+        {"t": "2026-08-01", "price": "14600000"},
+        {"t": "2026-08-03", "price": "15000000"},
+    ]
+    assert calls == [("30d", None), ("30d", "balance"), ("30d", "price")]
     assert data["connected"] is True
     assert data["range"] == "30d"
+
+
+def test_cs_asset_detail_quantity_for_a_coin_without_price(client, monkeypatch):
+    """価格が取れないコインは評価額の点が無いが、保有数の点は返る。"""
+    _patch_cs_asset_history(
+        monkeypatch,
+        [],
+        [{"t": "2026-08-01", "balance": "1200"}, {"t": "2026-08-02", "balance": "1500"}],
+    )
+    history = client.get("/api/crypto-summary/asset/BTC").json()["history"]
+    assert history["points"] == []
+    assert history["quantity_points"] == [
+        {"t": "2026-08-01", "quantity": "1200"},
+        {"t": "2026-08-02", "quantity": "1500"},
+    ]
+
+
+def test_cs_asset_detail_falls_back_on_an_old_cs(client, monkeypatch):
+    """metric を知らない CS では、評価額の点に付いた balance を保有数にする。"""
+    calls: list = []
+    _patch_cs_asset_history(
+        monkeypatch,
+        [
+            {"t": "2026-08-01", "value": "4400000", "balance": "0.25"},
+            {"t": "2026-08-03", "value": "4500000", "balance": "0.3"},
+        ],
+        None,
+        calls,
+    )
+    history = client.get("/api/crypto-summary/asset/BTC").json()["history"]
+    assert [p["value"] for p in history["points"]] == ["4400000", "4500000"]
+    assert history["quantity_points"] == [
+        {"t": "2026-08-01", "quantity": "0.25"},
+        {"t": "2026-08-03", "quantity": "0.3"},
+    ]
+    # 古い CS には価格の系列が無い。保有数の応答で判るので、価格は聞きもしない
+    assert history["price_points"] == []
+    assert [m for _r, m in calls] == [None, "balance"]
+
+
+def test_cs_asset_detail_does_not_ask_again_when_the_history_failed(client, monkeypatch):
+    """評価額が取れない（CS に届かない等）ときは保有数を重ねて問い合わせない。"""
+    calls: list = []
+    _patch_cs_asset_history(monkeypatch, None, None, calls)
+    data = client.get("/api/crypto-summary/asset/BTC").json()
+    assert data["history"]["points"] == []
+    assert data["history"]["quantity_points"] == []
+    assert data["history"]["price_points"] == []
+    assert [m for _r, m in calls] == [None]
 
 
 def test_cs_asset_detail_disabled_404(client, monkeypatch):
@@ -483,11 +583,15 @@ def test_health(client):
 
 
 def _patch_cs_history_by_scope(monkeypatch, by_scope, calls=None):
-    """scope → points のマップで応答を差し替える。載っていない scope は None。"""
+    """scope → points のマップで応答を差し替える。載っていない scope は None。
 
-    def fake(currency, range_key, scope, user_sub, warn=None):
+    metric を知らない古い CS として振る舞う（metric=balance にも評価額の応答）。
+    calls には scope を、metric 付きの呼び出しは "scope?metric=..." で記録する。
+    """
+
+    def fake(currency, range_key, scope, user_sub, warn=None, metric=None):
         if calls is not None:
-            calls.append(scope)
+            calls.append(scope if metric is None else f"{scope}?metric={metric}")
         points = by_scope.get(scope)
         if points is None:
             return None
@@ -575,7 +679,8 @@ def test_cs_asset_detail_day_change_reuses_the_history_it_already_fetches(
     data = client.get("/api/crypto-summary/asset/BTC").json()
     assert data["day_change"] == "300000"
     assert data["day_change_pct"] == "7.14"
-    assert calls == ["asset:BTC"]                    # 追加リクエストなし
+    # 前日比のための追加リクエスト（7d の履歴）は無い。2本目は保有数の系列
+    assert calls == ["asset:BTC", "asset:BTC?metric=balance"]
 
 
 def test_cs_down_leaves_day_change_empty_without_error(client, store, monkeypatch):

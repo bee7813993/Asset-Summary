@@ -223,14 +223,17 @@ def fetch_cs_history(
     scope: str,
     user_sub: str | None,
     warn: WarnFn | None = None,
+    metric: str | None = None,
 ) -> dict | None:
-    return _get(
-        "/api/portfolio-history",
-        {"currency": currency, "range": range_key, "scope": scope},
-        user_sub,
-        HISTORY_TTL,
-        warn,
-    )
+    """metric を省くと評価額。"balance" は asset スコープの保有数量（CS の api.md §8）。
+
+    metric はクエリに載るので TTL キャッシュのキーも別になる（評価額の応答を
+    保有数量として返したり、その逆をしたりしない）。
+    """
+    params = {"currency": currency, "range": range_key, "scope": scope}
+    if metric:
+        params["metric"] = metric
+    return _get("/api/portfolio-history", params, user_sub, HISTORY_TTL, warn)
 
 
 def fetch_cs_coin_icons(warn: WarnFn | None = None) -> dict | None:
@@ -475,22 +478,71 @@ def merge_cs_history(
     return contributed
 
 
-def cs_history_points(cs_points: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
-    """CS のコイン別推移の点を、AS の推移点の形に揃える（balance → quantity）。
+def cs_value_points(cs_points: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """CS のコイン別推移の点から評価額だけを取り出す（[{"t", "value"}]）。
 
-    CS は scope=asset:SYM の点にだけ、その日の残高（全口座の合計）を balance で
-    載せる。AS の推移点は保有数を quantity と呼ぶ（1銘柄スコープの
-    /api/portfolio-history と同じ形）ので、画面は CS 由来の点かどうかを気にせず
-    評価額と保有数を切り替えられる。balance を返さない CS なら quantity は None。
-    CS は最初の記録日より前の点を作らない（遡及しない）ので backfilled は付けない。
+    評価額の無い点は落とす（null を渡すと画面の線が 0 に落ちる）。
     """
     out: list[dict[str, Any]] = []
     for p in cs_points or []:
         if not isinstance(p, dict):
             continue
-        out.append(
-            {"t": p.get("t"), "value": p.get("value"), "quantity": p.get("balance")}
-        )
+        t, v = p.get("t"), p.get("value")
+        if t and v is not None and v != "":
+            out.append({"t": t, "value": v})
+    return out
+
+
+def is_balance_history(payload: dict | None) -> bool:
+    """portfolio-history の応答が metric=balance（保有数量）の系列か。
+
+    metric を知らない古い CS はこの引数を無視して評価額の応答を返し、応答に
+    metric キーが無い。新しい CS も asset スコープ以外では value に丸めるので、
+    応答の metric を見るまでは保有数量の系列とはみなさない。
+    """
+    return isinstance(payload, dict) and payload.get("metric") == "balance"
+
+
+def cs_quantity_points(
+    balance_hist: dict | None, value_hist: dict | None
+) -> list[dict[str, Any]]:
+    """コイン別推移の保有数の点を AS の形（[{"t", "quantity"}]）で返す。
+
+    保有数は metric=balance の応答から取る。台帳だけで決まるので価格の無い日も
+    欠けず、価格の取れないコインでも返る。それが無いとき（古い CS・取得失敗）は、
+    評価額の点に付いた balance（scope=asset のときだけ載る）に戻る。こちらは
+    価格の無い日の点が抜けるが、線は引ける。CS は最初に保有した日より前の点を
+    作らない（遡及しない）ので backfilled は付けない。
+    """
+    if is_balance_history(balance_hist):
+        src = balance_hist.get("points")
+    else:
+        src = (value_hist or {}).get("points")
+    out: list[dict[str, Any]] = []
+    for p in src or []:
+        if not isinstance(p, dict):
+            continue
+        t, q = p.get("t"), p.get("balance")
+        if t and q is not None and q != "":
+            out.append({"t": t, "quantity": q})
+    return out
+
+
+def cs_price_points(price_hist: dict | None) -> list[dict[str, Any]]:
+    """コイン別推移の価格の点（[{"t", "price"}]）。metric=price の応答からだけ取る。
+
+    保有とは関係なく、レンジの開始日から価格の取れた日が並ぶ（CS の api.md §8）。
+    metric を知らない古い CS は評価額の応答を返すので、そのときは空（価格なし）。
+    """
+    if not (isinstance(price_hist, dict) and price_hist.get("metric") == "price"):
+        return []
+    out: list[dict[str, Any]] = []
+    for p in price_hist.get("points") or []:
+        if not isinstance(p, dict):
+            continue
+        t, v = p.get("t"), p.get("price")
+        if t and v is not None and v != "":
+            out.append({"t": t, "price": v})
     return out
 
 

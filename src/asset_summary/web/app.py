@@ -2389,9 +2389,23 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
         sym = sym.strip().upper()
         acc = fetch_cs_asset_accounts(sym, cur, sub, warn=warnings.append)
         range_norm = range_key if range_key in (*_RANGE_DAYS, "all") else "90d"
-        hist = fetch_cs_history(
-            cur, range_norm, f"asset:{sym}", sub, warn=warnings.append
-        )
+        scope = f"asset:{sym}"
+        hist = fetch_cs_history(cur, range_norm, scope, sub, warn=warnings.append)
+        # 保有数は metric=balance、価格は metric=price の系列から取る。評価額が
+        # 取れなかったとき（CS に届かない・認証の失敗など）はどちらも取れないので、
+        # 重ねて問い合わせない（タイムアウトを何度も待たない）。metric を知らない
+        # 古い CS はどの metric にも評価額の応答を返す（CS と AS は別々に更新される）。
+        # そのとき保有数は評価額の点に付いた balance に戻り、価格は出せないので、
+        # 保有数の系列が返ってこなければ価格は聞かない
+        bal = price = None
+        if hist is not None:
+            bal = fetch_cs_history(
+                cur, range_norm, scope, sub, warn=warnings.append, metric="balance"
+            )
+            if crypto_summary_client.is_balance_history(bal):
+                price = fetch_cs_history(
+                    cur, range_norm, scope, sub, warn=warnings.append, metric="price"
+                )
         # 前日比は /api/summary の前日値から作る（同じコインの行が保有テーブルにも
         # 出るので、そちらと同じ数字にする必要がある）。summary は TTL キャッシュ
         # 済みで追加の往復にならない。前日値を返さない旧 CS 相手のときだけ、
@@ -2417,10 +2431,15 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
             "day_change_pct": _pct(day_change_pct),
             "accounts": (acc or {}).get("accounts") or [],
             "history": {
-                # 評価額と保有数（CS の balance）を載せる。画面が切り替えて描く
-                "points": crypto_summary_client.cs_history_points(
+                # 評価額・保有数・価格を載せ、画面が切り替えて描く（切替では取り直さない）。
+                # 点の並ぶ日がそれぞれ違う（保有数は価格の無い日にも、価格は持つ前の日にも
+                # 点がある）ので、日付で1本にまとめず別々の配列で返す。まとめると値の無い
+                # 日が null になり、線が 0 に落ちる
+                "points": crypto_summary_client.cs_value_points(
                     (hist or {}).get("points")
                 ),
+                "quantity_points": crypto_summary_client.cs_quantity_points(bal, hist),
+                "price_points": crypto_summary_client.cs_price_points(price),
                 "is_partial": bool((hist or {}).get("is_partial")),
             },
             "range": range_norm,
