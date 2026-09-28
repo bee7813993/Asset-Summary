@@ -44,15 +44,30 @@ let _acctRange = localStorage.getItem("as_acct_range") || "90d";
 let _pfRange = localStorage.getItem("as_pf_range") || "90d";
 let _secRange = localStorage.getItem("as_sec_range") || "1y";
 
+// 推移グラフの表示対象タブ（localStorage 記憶）。保有数を足し合わせてよいのは
+// 1銘柄の中だけなので、切替があるのは銘柄詳細と CS コイン詳細の推移だけ
+function _loadChoice(storageKey, allowed, fallback) {
+  const saved = localStorage.getItem(storageKey);
+  return allowed.includes(saved) ? saved : fallback;
+}
+let _secMetric = _loadChoice("as_sec_metric", ["price", "value", "quantity"], "price");
+let _csAssetMetric = _loadChoice("as_cs_metric", ["value", "quantity"], "value");
+
 // 詳細ページの現在対象
 let _classDetailId = null;
 let _acctDetailName = null;
 let _secDetailId = null;
+// 銘柄詳細の推移グラフの材料。価格は /api/security の応答に同梱、評価額と保有数は
+// 1銘柄スコープの /api/portfolio-history の同じ点列（切替のたびに取り直さない）
+let _secPrice = null;       // {history, avgCost, currency}
+let _secHoldHist = null;    // {key, data}
+let _secHistReq = 0;        // 待つ間に表示対象が変わったら古い応答で描かない
 
 // Crypto-Summary 連携（コイン別サブビュー）
 let _csAssetSym = null;
 let _csAssetRange = localStorage.getItem("as_cs_range") || "90d";
 let _csAssetChart = null;
+let _csAssetHist = null;    // {points, currency} — 評価額と保有数を同じ点列から描く
 let _csCoinIcons = null;    // {SYM: url} — 起動時に一度だけ取得
 
 // キャッシュ
@@ -171,6 +186,16 @@ function fmtAmount(value) {
   const n = Number(value);
   if (!isFinite(n)) return "—";
   return n.toLocaleString(undefined, { maximumFractionDigits: 4 });
+}
+
+// 狭い画面の縦軸用: 桁の大きい数量を「144万」「1.4M」に畳む（fmtMoneyShort の数量版）
+function fmtAmountShort(value) {
+  const n = Number(value);
+  if (maskAmounts || value === null || value === undefined || value === "" || !isFinite(n)) {
+    return fmtAmount(value);
+  }
+  if (Math.abs(n) < 10_000) return fmtAmount(value);
+  return n.toLocaleString(undefined, { notation: "compact", maximumFractionDigits: 1 });
 }
 
 // 損益額: 符号付き。JPYは「+123,456円」形式、他通貨は「+$1,234.56」。
@@ -835,14 +860,21 @@ function renderHoldingsRows(tbody, holdings, currency, opts = {}) {
 
 // ---- 推移グラフ（グラデーション折れ線） ----
 
-function renderHistoryChart(canvasId, points, currency, existingChart) {
+// opts.metric: "value"（評価額・既定）| "quantity"（保有数）。保有数の点を
+// 持つのは1銘柄の推移（銘柄詳細・CS コイン詳細）だけ。
+function renderHistoryChart(canvasId, points, currency, existingChart, opts = {}) {
   const canvas = document.getElementById(canvasId);
   if (!canvas) return null;
   if (existingChart) existingChart.destroy();
 
   const emptyEl = canvas.parentElement.querySelector(".history-empty");
+  const isQty = opts.metric === "quantity";
+  // 保有数を返さない点（balance を返さない旧 CS など）は描けないので落とす
+  const rows = isQty
+    ? (points || []).filter((p) => p.quantity != null && p.quantity !== "")
+    : (points || []);
 
-  if (!points || points.length < 2) {
+  if (rows.length < 2) {
     canvas.style.display = "none";
     if (emptyEl) emptyEl.classList.remove("hidden");
     return null;
@@ -850,8 +882,8 @@ function renderHistoryChart(canvasId, points, currency, existingChart) {
   canvas.style.display = "";
   if (emptyEl) emptyEl.classList.add("hidden");
 
-  const labels = points.map((p) => p.t);
-  const values = points.map((p) => Number(p.value));
+  const labels = rows.map((p) => p.t);
+  const values = rows.map((p) => Number(isQty ? p.quantity : p.value));
 
   // 狭い描画域（スマホ縦持ちなど）では日付を "MM-DD" に短縮し、本数も減らす。
   // フル表記のままだと "2026-08-17" が隣とくっついて読めない。完全な日付は
@@ -861,7 +893,7 @@ function renderHistoryChart(canvasId, points, currency, existingChart) {
 
   const th = chartTheme();
   const datasets = [{
-    label: "value",
+    label: isQty ? "quantity" : "value",
     data: values,
     borderColor: "#2f81f7",
     backgroundColor(ctx) {
@@ -881,6 +913,22 @@ function renderHistoryChart(canvasId, points, currency, existingChart) {
   // 取得コスト線は引かない: 取得原価を持たない資産（現金・ポイント・年金など）も
   // 評価額には乗るので、合計取得コストは常に過少で評価額と比べられない。
   // 併せて縦軸が評価額だけで決まり、変動が潰れずに見えるようになる。
+  if (isQty) {
+    // 保有数は記録（スナップショット）のある日にだけ変わる階段。なめらかに
+    // 結ぶと、記録の間に少しずつ買い増したように見えてしまう
+    datasets[0].tension = 0;
+    datasets[0].stepped = true;
+    // 初回の記録より前は、最初に記録された保有数をさかのぼって当てはめた値
+    // （評価額の遡及と同じ規則）。記録と見分けが付くよう破線にする。
+    // 階段の横棒は始点の値なので、始点が遡及ならその区間を破線にする
+    if (rows.some((p) => p.backfilled)) {
+      datasets[0].segment = {
+        borderDash: (ctx) =>
+          rows[ctx.p0DataIndex] && rows[ctx.p0DataIndex].backfilled ? [6, 4] : undefined,
+      };
+    }
+  }
+  const fmtY = (v) => (isQty ? fmtAmount(v) : fmtMoney(v, currency));
 
   return new Chart(canvas, {
     type: "line",
@@ -905,10 +953,16 @@ function renderHistoryChart(canvasId, points, currency, existingChart) {
           border: { display: false },
         },
         y: {
+          // 保有数は 0 からの量として見せる（軸を切ると、数株の買い増しが
+          // 倍増のように見える）。評価額は変動が見えるよう従来どおり自動
+          beginAtZero: isQty,
           ticks: {
             color: th.tick,
             font: { size: 11 },
-            callback(v) { return narrow ? fmtMoneyShort(v, currency) : fmtMoney(v, currency); },
+            callback(v) {
+              if (isQty) return narrow ? fmtAmountShort(v) : fmtAmount(v);
+              return narrow ? fmtMoneyShort(v, currency) : fmtMoney(v, currency);
+            },
           },
           grid: { color: th.grid },
           border: { display: false },
@@ -925,7 +979,11 @@ function renderHistoryChart(canvasId, points, currency, existingChart) {
           padding: 10,
           callbacks: {
             title: ([item]) => (item ? item.label : ""),
-            label: (item) => "  " + fmtMoney(item.parsed.y, currency),
+            label: (item) => "  " + fmtY(item.parsed.y),
+            afterLabel: (item) => {
+              const p = rows[item.dataIndex];
+              return isQty && p && p.backfilled ? "  " + t("chart.backfilledTip") : undefined;
+            },
           },
         },
       },
@@ -940,6 +998,34 @@ function _setRangeActive(tabsId, range) {
     btn.classList.toggle("active", btn.dataset.range === range));
 }
 
+function _setMetricActive(tabsId, metric) {
+  const tabs = document.getElementById(tabsId);
+  if (!tabs) return;
+  tabs.querySelectorAll(".range-tab").forEach((btn) =>
+    btn.classList.toggle("active", btn.dataset.metric === metric));
+}
+
+/** data-i18n ごと差し替えて文言を入れる（言語切替の applyI18n で元に戻らないように）。 */
+function _setI18nText(el, key) {
+  if (!el) return;
+  el.setAttribute("data-i18n", key);
+  el.textContent = t(key);
+}
+
+/** 評価額推移の注記（取得中・価格未取得・手動評価待ち）。HTML 片の配列を返す。 */
+function _historyNotes(data) {
+  const notes = [];
+  if (data.is_partial) notes.push(t("label.historyPartial"));
+  if (data.unpriced && data.unpriced.length) {
+    notes.push(t("label.unpricedAssets") + data.unpriced.map(escapeHtml).join(", "));
+  }
+  // 手動評価待ちは「取得中」ではない。待っても出ないので入力を促す
+  if (data.needs_valuation && data.needs_valuation.length) {
+    notes.push(t("label.needsValuation") + data.needs_valuation.map(escapeHtml).join(", "));
+  }
+  return notes;
+}
+
 async function _fetchHistAndRender(scope, range, canvasId, loadingId, unpricedId, getRef, setRef) {
   const currency = currentCurrency();
   const loading = document.getElementById(loadingId);
@@ -951,15 +1037,7 @@ async function _fetchHistAndRender(scope, range, canvasId, loadingId, unpricedId
     );
     setRef(renderHistoryChart(canvasId, data.points, currency, getRef()));
     if (unpricedEl) {
-      const notes = [];
-      if (data.is_partial) notes.push(t("label.historyPartial"));
-      if (data.unpriced && data.unpriced.length) {
-        notes.push(t("label.unpricedAssets") + data.unpriced.map(escapeHtml).join(", "));
-      }
-      // 手動評価待ちは「取得中」ではない。待っても出ないので入力を促す
-      if (data.needs_valuation && data.needs_valuation.length) {
-        notes.push(t("label.needsValuation") + data.needs_valuation.map(escapeHtml).join(", "));
-      }
+      const notes = _historyNotes(data);
       if (notes.length) {
         unpricedEl.innerHTML = notes.join("<br>");
         unpricedEl.classList.remove("hidden");
@@ -1867,6 +1945,9 @@ async function showCsAssetDetail(sym, range) {
     document.getElementById(id).textContent = "—";
   });
   tbody.innerHTML = "";
+  // 読み込み中に表示対象を切り替えても、前のコインの点列で描かない
+  _csAssetHist = null;
+  _syncCsAssetHistoryHeader();
   loading.classList.remove("hidden");
   try {
     const data = await fetchJSON(
@@ -1882,9 +1963,8 @@ async function showCsAssetDetail(sym, range) {
       )}</span>`;
     }
 
-    _csAssetChart = renderHistoryChart(
-      "cs-asset-history-chart", (data.history || {}).points || [], currency, _csAssetChart
-    );
+    _csAssetHist = { points: (data.history || {}).points || [], currency };
+    renderCsAssetHistory();
 
     (data.accounts || []).forEach((a) => {
       const tr = document.createElement("tr");
@@ -1904,11 +1984,35 @@ async function showCsAssetDetail(sym, range) {
       renderWarningsInto(warnEl, data.warnings);
     }
   } catch (e) {
-    _csAssetChart = renderHistoryChart("cs-asset-history-chart", [], currency, _csAssetChart);
+    _csAssetHist = null;
+    renderCsAssetHistory();
     renderWarningsInto(warnEl, [], "⚠ " + escapeHtml(t("status.error")) + escapeHtml(e.message));
   } finally {
     loading.classList.add("hidden");
   }
+}
+
+/**
+ * CS コイン詳細の推移を、選んでいる表示対象（評価額・保有数）で描く。
+ * 保有数は CS がコイン別の推移に載せるその日の残高（AS 側で quantity に改名済み）。
+ * どちらも同じ点列から描くので、切替では取り直さない。
+ */
+function renderCsAssetHistory() {
+  _syncCsAssetHistoryHeader();
+  const h = _csAssetHist || {};
+  _csAssetChart = renderHistoryChart(
+    "cs-asset-history-chart", h.points || [], h.currency || currentCurrency(),
+    _csAssetChart, { metric: _csAssetMetric }
+  );
+}
+
+/** 表示対象タブと見出し（読み込みを待たずに合わせる。既定以外を記憶しているとき用）。 */
+function _syncCsAssetHistoryHeader() {
+  _setMetricActive("cs-asset-metric-tabs", _csAssetMetric);
+  _setI18nText(
+    document.getElementById("cs-asset-history-title"),
+    _csAssetMetric === "quantity" ? "label.quantityHistorySection" : "label.valueHistorySection"
+  );
 }
 
 // ---- 口座別ページ ----
@@ -2357,6 +2461,81 @@ function renderPriceChart(priceHistory, avgCost, currency) {
   });
 }
 
+const _SEC_METRIC_TITLE = {
+  price: "label.priceHistorySection",
+  value: "label.valueHistorySection",
+  quantity: "label.quantityHistorySection",
+};
+
+/** 表示対象タブ・見出し・空のときの文言（読み込みを待たずに合わせる）。 */
+function _syncSecHistoryHeader() {
+  _setMetricActive("sec-metric-tabs", _secMetric);
+  _setI18nText(document.getElementById("sec-history-title"), _SEC_METRIC_TITLE[_secMetric]);
+  _setI18nText(
+    document.getElementById("price-chart").parentElement.querySelector(".history-empty"),
+    _secMetric === "price" ? "label.noPriceData" : "label.noHistData"
+  );
+}
+
+/**
+ * 銘柄詳細の推移グラフを、選んでいる表示対象（価格・評価額・保有数）で描く。
+ * 価格は /api/security の応答に同梱。評価額と保有数は1銘柄スコープの
+ * /api/portfolio-history の同じ点列から描き分けるので、この2つの切替では取り直さない。
+ */
+async function renderSecurityHistory() {
+  const req = ++_secHistReq;
+  const metric = _secMetric;
+  const loading = document.getElementById("price-history-loading");
+  const note = document.getElementById("sec-history-note");
+  _syncSecHistoryHeader();
+  loading.classList.add("hidden");
+  note.classList.add("hidden");
+
+  if (metric === "price") {
+    const p = _secPrice || {};
+    renderPriceChart(p.history || [], p.avgCost, p.currency);
+    return;
+  }
+
+  const currency = currentCurrency();
+  const key = `${_secDetailId}|${_secRange}|${currency}`;
+  let data = _secHoldHist && _secHoldHist.key === key ? _secHoldHist.data : null;
+  if (!data) {
+    loading.classList.remove("hidden");
+    try {
+      data = await fetchJSON(
+        `/api/portfolio-history?scope=${encodeURIComponent(`security:${_secDetailId}`)}` +
+        `&range=${_secRange}&currency=${currency}`
+      );
+    } catch (e) {
+      console.warn("[asset-summary] security history:", e);
+    }
+    // 待つ間に銘柄・範囲・表示対象が変わったら、そちらの描画に任せる
+    if (req !== _secHistReq) return;
+    loading.classList.add("hidden");
+    if (data) _secHoldHist = { key, data };
+  }
+
+  const points = (data && data.points) || [];
+  _priceChart = renderHistoryChart(
+    "price-chart", points, (data && data.currency) || currency, _priceChart, { metric }
+  );
+  const notes = [];
+  if (metric === "quantity") {
+    // 遡及した区間（破線）が範囲に入っているときだけ、どこから記録かを断る
+    const recorded = points.find((p) => !p.backfilled);
+    if (points.length && points[0].backfilled && recorded) {
+      notes.push(escapeHtml(t("label.quantityBackfilled", { date: recorded.t })));
+    }
+  } else if (data) {
+    notes.push(..._historyNotes(data));
+  }
+  if (notes.length) {
+    note.innerHTML = notes.join("<br>");
+    note.classList.remove("hidden");
+  }
+}
+
 function priceSourceHtml(sec) {
   const status = sec.price_source_status;
   if (status === "linked") {
@@ -2399,6 +2578,11 @@ async function showSecurityDetail(id, range) {
   _secDetailId = id;
   localStorage.setItem("as_sec_range", _secRange);
   _setRangeActive("sec-range-tabs", _secRange);
+  // 推移の点列はこの表示のあいだの切替にだけ使い回す（銘柄・範囲を変えたときや、
+  // 取込のあとに開き直したときは取り直す）
+  _secPrice = null;
+  _secHoldHist = null;
+  _syncSecHistoryHeader();
 
   const currency = currentCurrency();
   const loading = document.getElementById("security-detail-loading");
@@ -2432,8 +2616,10 @@ async function showSecurityDetail(id, range) {
     document.getElementById("tile-pl").innerHTML = plAmountHtml(tiles.pl, currency);
     document.getElementById("tile-pl-pct").innerHTML = plPctHtml(tiles.pl_pct);
 
-    // 価格チャート（平均取得単価の水平破線つき）
-    renderPriceChart(data.price_history || [], tiles.avg_cost, secCur);
+    // 推移グラフ（価格・評価額・保有数の切替。平均取得単価の水平破線は価格のみ）。
+    // 評価額・保有数は別の取得になるので、待たずにページの残りを描く
+    _secPrice = { history: data.price_history || [], avgCost: tiles.avg_cost, currency: secCur };
+    renderSecurityHistory();
 
     // 警告
     renderWarningsInto(document.getElementById("security-warnings"), data.warnings, "");
@@ -5165,6 +5351,15 @@ document.getElementById("cs-asset-range-tabs").querySelectorAll(".range-tab").fo
     showCsAssetDetail(_csAssetSym, btn.dataset.range);
   }));
 
+// 表示対象（評価額・保有数）の切替。点列は取得済みなので描き直すだけ
+document.getElementById("cs-asset-metric-tabs").querySelectorAll(".range-tab").forEach((btn) =>
+  btn.addEventListener("click", () => {
+    if (_csAssetSym == null) return;
+    _csAssetMetric = btn.dataset.metric;
+    localStorage.setItem("as_cs_metric", _csAssetMetric);
+    renderCsAssetHistory();
+  }));
+
 document.getElementById("acct-range-tabs").querySelectorAll(".range-tab").forEach((btn) =>
   btn.addEventListener("click", () => loadAcctHistoryChart(null, btn.dataset.range)));
 
@@ -5177,6 +5372,15 @@ document.getElementById("sec-range-tabs").querySelectorAll(".range-tab").forEach
     _secRange = btn.dataset.range;
     localStorage.setItem("as_sec_range", _secRange);
     showSecurityDetail(_secDetailId, _secRange);
+  }));
+
+// 表示対象（価格・評価額・保有数）の切替。ページの残りは描き直さない
+document.getElementById("sec-metric-tabs").querySelectorAll(".range-tab").forEach((btn) =>
+  btn.addEventListener("click", () => {
+    if (_secDetailId == null) return;
+    _secMetric = btn.dataset.metric;
+    localStorage.setItem("as_sec_metric", _secMetric);
+    renderSecurityHistory();
   }));
 
 // ---- 通貨・再取得 ----

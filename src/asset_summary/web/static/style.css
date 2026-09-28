@@ -855,10 +855,18 @@ html.light .autoalloc-warn.strong { color: #991b1b; }
   display: flex;
   align-items: center;
   justify-content: space-between;
+  /* 表示対象のタブが付く推移は、スマホ幅では見出しと同じ行に収まらない */
+  flex-wrap: wrap;
+  gap: 8px 12px;
   margin-bottom: 12px;
 }
 .history-header h2 { margin-bottom: 0; }
+/* 表示対象（価格・評価額・保有数）とレンジのタブ2組 */
+.history-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; }
 .range-tabs { display: flex; gap: 2px; }
+/* 表示対象は「何を見るか」、レンジは「いつを見るか」。同じ見た目のボタンが
+   一列に並ぶと1組に見えるので、表示対象だけ枠で囲って別の組だと示す */
+.metric-tabs { border: 1px solid var(--border); border-radius: 8px; padding: 2px; }
 .range-tab {
   background: none;
   border: 1px solid transparent;

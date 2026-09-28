@@ -767,6 +767,15 @@ def _parse_scope(scope: str | None) -> tuple[str, str] | None:
     raise HTTPException(status_code=400, detail=f"不正な scope です: {scope}")
 
 
+def _ser_history_point(p: dict[str, Any]) -> dict[str, Any]:
+    """推移の1点。保有数は1銘柄のスコープの点だけが持つ（daily_series 参照）。"""
+    out = {"t": p["t"], "value": _s(p["value"]), "cost": _s(p["cost"])}
+    if "quantity" in p:
+        out["quantity"] = _s(p["quantity"])
+        out["backfilled"] = bool(p["backfilled"])
+    return out
+
+
 def _range_start(range_key: str, snapshots: list[HoldingSnapshot], end: date) -> date:
     if range_key == "all":
         five_years_ago = end - timedelta(days=365 * 5)
@@ -1612,6 +1621,16 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
 
         snapshots = store.all_snapshots()
         secs = store.securities_by_id()
+        # 価格系列を用意する銘柄。1銘柄の推移（銘柄詳細の評価額・保有数）なら
+        # その銘柄のぶんだけで足りる — 全銘柄を回すと、ALL の範囲では他の銘柄の
+        # 履歴取得まで走ってしまう
+        priced_secs = secs
+        if scope_t is not None and scope_t[0] == "security":
+            sec_id = _to_int(scope_t[1], "security")
+            if sec_id not in secs:
+                raise HTTPException(status_code=404, detail="銘柄が見つかりません")
+            scope_t = ("security", str(sec_id))
+            priced_secs = {sec_id: secs[sec_id]}
         # タグ・Myポートフォリオは「銘柄の集合」ではなく「銘柄ごとの計上率」で
         # 決まるので、daily_series には scope ではなく重みを渡す
         ratio_by_security: dict[Any, Decimal] | None = None
@@ -1634,7 +1653,7 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
 
         linked = [
             s
-            for s in secs.values()
+            for s in priced_secs.values()
             if s.price_source_status == PriceSourceStatus.LINKED
         ]
         if linked:
@@ -1643,7 +1662,7 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
             except Exception as e:  # noqa: BLE001
                 warnings.append(f"価格取得エラー: {e}")
         try:
-            ensure_re_index_history(store, secs.values(), end, warn=warnings.append)
+            ensure_re_index_history(store, priced_secs.values(), end, warn=warnings.append)
         except Exception as e:  # noqa: BLE001
             warnings.append(f"価格取得エラー: {e}")
         ccys = {s.currency for s in secs.values() if s.currency != "JPY"}
@@ -1657,7 +1676,7 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
 
         # start は制限しない（初回登録日以前への遡及バックフィルに過去価格を使う）
         price_series: dict[int, tuple[dict[str, Decimal], str]] = {}
-        for sid, sec in secs.items():
+        for sid, sec in priced_secs.items():
             price_series[sid] = store.price_series_for_security(
                 sec, start=None, end=end.isoformat()
             )
@@ -1766,10 +1785,7 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
             "currency": cur,
             "range": range_norm,
             "scope": scope,
-            "points": [
-                {"t": p["t"], "value": _s(p["value"]), "cost": _s(p["cost"])}
-                for p in points
-            ],
+            "points": [_ser_history_point(p) for p in points],
             "unpriced": sorted(unpriced_names),
             "needs_valuation": sorted(needs_valuation),
             "is_partial": bool(unpriced_names) or cs_is_partial,
@@ -2226,7 +2242,10 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
             "day_change_pct": _pct(day_change_pct),
             "accounts": (acc or {}).get("accounts") or [],
             "history": {
-                "points": (hist or {}).get("points") or [],
+                # 評価額と保有数（CS の balance）を載せる。画面が切り替えて描く
+                "points": crypto_summary_client.cs_history_points(
+                    (hist or {}).get("points")
+                ),
                 "is_partial": bool((hist or {}).get("is_partial")),
             },
             "range": range_norm,

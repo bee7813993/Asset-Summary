@@ -680,8 +680,19 @@ def daily_series(
         「配分率ぶんだけ計上する」ために各銘柄の寄与へ掛ける。ここに載らない
         銘柄は集計から外れる（scope と違い銘柄ごとに重みを変えられる）。
     返値: [{"t": ISO日付, "value": Decimal, "cost": Decimal|None}, ...]
+
+    scope が ("security", id) のときだけ、各点に保有数も載せる:
+    quantity（全口座・全ロットの合計）と backfilled（初回スナップショットより前の
+    ロットを含む＝記録ではなく遡及した数量）。数量を足し合わせてよいのは単位が
+    揃う1銘柄の中だけなので、複数銘柄にまたがるスコープでは出さない。
+    保有数は評価額と同じスナップショットの選び方で数える — 評価額の点が
+    「その日の保有数 × 価格」なのだから、保有数の点はその保有数そのもの。
     """
-    excluded = _excluded_classes(settings)
+    single_security = scope is not None and scope[0] == "security"
+    # 「総資産に含める」は総資産を集計するときの規則で、1銘柄だけを見る推移には
+    # 当てはまらない（銘柄詳細のタイルも、総資産から外したクラスの銘柄をそのまま
+    # 出す）。ここで外すと、その銘柄の推移がゼロの横線になってしまう。
+    excluded = set() if single_security else _excluded_classes(settings)
     fx = FxLookup(fx_series)
     display_fx = SeriesLookup(jpy_per_display_series or {})
 
@@ -735,6 +746,8 @@ def daily_series(
         total = ZERO
         total_cost = ZERO
         any_cost = False
+        quantity = ZERO
+        backfilled = False
         for p in prepared:
             snaps: list[HoldingSnapshot] = p["snaps"]
             i = bisect_right(p["snap_dates"], d)
@@ -742,6 +755,9 @@ def daily_series(
             snap = snaps[i - 1] if i > 0 else snaps[0]
             if snap.quantity == ZERO:
                 continue
+            quantity += snap.quantity
+            if i == 0:
+                backfilled = True
             sec: Security = p["sec"]
             ratio: Decimal = p["ratio"]
             if sec.asset_class == AssetClass.CASH:
@@ -778,12 +794,15 @@ def daily_series(
                 any_cost = True
         disp = display_fx.at(d) if display_fx else None
         divisor = disp if disp else Decimal("1")
-        out.append(
-            {
-                "t": d,
-                "value": total / divisor,
-                "cost": (total_cost / divisor) if any_cost else None,
-            }
-        )
+        point: dict[str, Any] = {
+            "t": d,
+            "value": total / divisor,
+            "cost": (total_cost / divisor) if any_cost else None,
+        }
+        if single_security:
+            # 数量は金額ではないので表示通貨で割らない
+            point["quantity"] = quantity
+            point["backfilled"] = backfilled
+        out.append(point)
         day += timedelta(days=1)
     return out

@@ -475,6 +475,25 @@ def merge_cs_history(
     return contributed
 
 
+def cs_history_points(cs_points: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """CS のコイン別推移の点を、AS の推移点の形に揃える（balance → quantity）。
+
+    CS は scope=asset:SYM の点にだけ、その日の残高（全口座の合計）を balance で
+    載せる。AS の推移点は保有数を quantity と呼ぶ（1銘柄スコープの
+    /api/portfolio-history と同じ形）ので、画面は CS 由来の点かどうかを気にせず
+    評価額と保有数を切り替えられる。balance を返さない CS なら quantity は None。
+    CS は最初の記録日より前の点を作らない（遡及しない）ので backfilled は付けない。
+    """
+    out: list[dict[str, Any]] = []
+    for p in cs_points or []:
+        if not isinstance(p, dict):
+            continue
+        out.append(
+            {"t": p.get("t"), "value": p.get("value"), "quantity": p.get("balance")}
+        )
+    return out
+
+
 # ----------------------------------------------------------------------
 # 前日比（CS には「前日値」の口が無いので日次履歴の点から求める）
 # ----------------------------------------------------------------------

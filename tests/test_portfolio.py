@@ -175,6 +175,128 @@ def test_daily_series_scope_filters():
     assert sec_only[0]["value"] == D("100000")
 
 
+def test_daily_series_security_scope_carries_quantity():
+    """1銘柄の推移は、評価額と同じスナップショットの保有数を各点に載せる。"""
+    secs = {1: _sec(1)}
+    snaps = [
+        _snap(1, as_of_date=date(2026, 8, 5), quantity=D("100")),
+        _snap(1, as_of_date=date(2026, 8, 10), quantity=D("200")),
+    ]
+    prices = {1: ({"2026-08-01": D("1000")}, "JPY")}
+    out = daily_series(
+        snaps, secs, ACCOUNTS, prices, {}, date(2026, 8, 3), date(2026, 8, 11), SETTINGS,
+        scope=("security", "1"),
+    )
+    by_date = {r["t"]: r for r in out}
+    # 初回スナップショットより前は、その保有数で遡及（評価額と同じ規則）。
+    # 記録ではないので backfilled を立てる
+    assert by_date["2026-08-03"]["quantity"] == D("100")
+    assert by_date["2026-08-03"]["backfilled"] is True
+    assert by_date["2026-08-05"]["quantity"] == D("100")
+    assert by_date["2026-08-05"]["backfilled"] is False
+    assert by_date["2026-08-09"]["quantity"] == D("100")
+    assert by_date["2026-08-10"]["quantity"] == D("200")
+    # 評価額はその保有数 × 価格そのもの
+    for r in out:
+        assert r["value"] == r["quantity"] * D("1000")
+
+
+def test_daily_series_security_quantity_sums_accounts_and_lots():
+    """口座・ロットが分かれていても、1銘柄の保有数は合計で出す。
+
+    後から現れたロット（別口座の買付など）は、その初回より前が遡及になる。
+    どこか1本でも遡及していればその点は記録ではない。
+    """
+    secs = {1: _sec(1), 2: _sec(2)}
+    accounts = {1: Account(id=1, name="A証券"), 2: Account(id=2, name="B証券")}
+    snaps = [
+        _snap(1, account_id=1, lot_seq=0, as_of_date=date(2026, 8, 1), quantity=D("100")),
+        _snap(1, account_id=1, lot_seq=1, as_of_date=date(2026, 8, 1), quantity=D("30")),
+        _snap(1, account_id=2, as_of_date=date(2026, 8, 5), quantity=D("50")),
+        # 別銘柄は数えない（数量を足してよいのは同じ銘柄の中だけ）
+        _snap(2, security_id=2, as_of_date=date(2026, 8, 1), quantity=D("999")),
+    ]
+    prices = {
+        1: ({"2026-08-01": D("1000")}, "JPY"),
+        2: ({"2026-08-01": D("10")}, "JPY"),
+    }
+    out = daily_series(
+        snaps, secs, accounts, prices, {}, date(2026, 8, 1), date(2026, 8, 6), SETTINGS,
+        scope=("security", "1"),
+    )
+    by_date = {r["t"]: r for r in out}
+    assert by_date["2026-08-01"]["quantity"] == D("180")
+    assert by_date["2026-08-04"]["backfilled"] is True
+    assert by_date["2026-08-05"]["quantity"] == D("180")
+    assert by_date["2026-08-05"]["backfilled"] is False
+
+
+def test_daily_series_security_quantity_drops_to_zero_after_sale():
+    secs = {1: _sec(1)}
+    snaps = [
+        _snap(1, as_of_date=date(2026, 8, 1), quantity=D("100")),
+        _snap(1, as_of_date=date(2026, 8, 5), quantity=D("0")),
+    ]
+    prices = {1: ({"2026-08-01": D("1000")}, "JPY")}
+    out = daily_series(
+        snaps, secs, ACCOUNTS, prices, {}, date(2026, 8, 4), date(2026, 8, 6), SETTINGS,
+        scope=("security", "1"),
+    )
+    by_date = {r["t"]: r for r in out}
+    assert by_date["2026-08-04"]["quantity"] == D("100")
+    assert by_date["2026-08-05"]["quantity"] == D("0")
+    assert by_date["2026-08-05"]["backfilled"] is False
+
+
+def test_daily_series_quantity_is_not_converted_to_display_currency():
+    """評価額は表示通貨へ換算するが、保有数は金額ではないので割らない。"""
+    secs = {1: _sec(1)}
+    snaps = [_snap(1, quantity=D("100"))]
+    prices = {1: ({"2026-08-01": D("1500")}, "JPY")}
+    out = daily_series(
+        snaps, secs, ACCOUNTS, prices, {}, date(2026, 8, 1), date(2026, 8, 1), SETTINGS,
+        jpy_per_display_series={"2026-08-01": D("150")},
+        scope=("security", "1"),
+    )
+    assert out[0]["value"] == D("1000")      # 150,000円 ÷ 150円/USD
+    assert out[0]["quantity"] == D("100")
+
+
+def test_daily_series_only_the_security_scope_carries_quantity():
+    """銘柄をまたぐスコープでは数量を合計しても意味が無いので載せない。"""
+    secs = {1: _sec(1), 2: _sec(2, asset_class=AssetClass.METAL, code=None)}
+    snaps = [_snap(1), _snap(2, security_id=2, quantity=D("10"), avg_cost=None)]
+    prices = {1: ({"2026-08-01": D("1000")}, "JPY"), 2: ({"2026-08-01": D("500")}, "JPY")}
+    for scope in (None, ("class", "metal"), ("account", "テスト証券")):
+        out = daily_series(
+            snaps, secs, ACCOUNTS, prices, {}, date(2026, 8, 1), date(2026, 8, 1),
+            SETTINGS, scope=scope,
+        )
+        assert "quantity" not in out[0]
+        assert "backfilled" not in out[0]
+
+
+def test_daily_series_security_scope_ignores_total_exclusion():
+    """「総資産に含める」をオフにしたクラスでも、その銘柄自体の推移は出す。
+
+    総資産の集計規則を1銘柄の画面に当てると、評価額も保有数もゼロの横線になる
+    （銘柄詳細のタイルは除外クラスの銘柄もそのまま出している）。
+    """
+    secs = {1: _sec(1, code=None, asset_class=AssetClass.POINT, unit=Unit.POINT)}
+    snaps = [_snap(1, quantity=D("2256"), avg_cost=None, reported_value_jpy=D("2256"))]
+    settings = {**SETTINGS, "include_points": "0"}
+    total = daily_series(
+        snaps, secs, ACCOUNTS, {}, {}, date(2026, 8, 1), date(2026, 8, 1), settings
+    )
+    assert total[0]["value"] == D("0")      # 総資産からは外れる（従来どおり）
+    one = daily_series(
+        snaps, secs, ACCOUNTS, {}, {}, date(2026, 8, 1), date(2026, 8, 1), settings,
+        scope=("security", "1"),
+    )
+    assert one[0]["value"] == D("2256")
+    assert one[0]["quantity"] == D("2256")
+
+
 def test_daily_series_zero_quantity_after_sale():
     secs = {1: _sec(1)}
     snaps = [

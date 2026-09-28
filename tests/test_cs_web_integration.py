@@ -425,7 +425,10 @@ def test_cs_asset_detail(client, monkeypatch):
 
     def fake_history(currency, range_key, scope, user_sub, warn=None):
         assert scope == "asset:BTC"
-        return {"points": [{"t": "2026-08-01", "value": "4400000"}], "is_partial": False}
+        return {
+            "points": [{"t": "2026-08-01", "value": "4400000", "balance": "0.25"}],
+            "is_partial": False,
+        }
 
     monkeypatch.setattr(web_app, "fetch_cs_asset_accounts", fake_accounts)
     monkeypatch.setattr(web_app, "fetch_cs_history", fake_history)
@@ -436,6 +439,8 @@ def test_cs_asset_detail(client, monkeypatch):
     assert data["value"] == "4500000"
     assert data["accounts"][0]["account"] == "bitFlyer"
     assert data["history"]["points"][0]["value"] == "4400000"
+    # その日の残高は保有数として渡す（評価額⇔保有数の切替用）
+    assert data["history"]["points"][0]["quantity"] == "0.25"
     assert data["connected"] is True
     assert data["range"] == "30d"
 

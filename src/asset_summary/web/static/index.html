@@ -379,13 +379,19 @@
 
           <section class="card history-card">
             <div class="history-header">
-              <h2 data-i18n="label.valueHistorySection">評価額推移</h2>
-              <div class="range-tabs" id="cs-asset-range-tabs">
-                <button class="range-tab" data-range="7d">7D</button>
-                <button class="range-tab" data-range="30d">30D</button>
-                <button class="range-tab active" data-range="90d">90D</button>
-                <button class="range-tab" data-range="1y">1Y</button>
-                <button class="range-tab" data-range="all">ALL</button>
+              <h2 id="cs-asset-history-title" data-i18n="label.valueHistorySection">評価額推移</h2>
+              <div class="history-controls">
+                <div class="range-tabs metric-tabs" id="cs-asset-metric-tabs">
+                  <button class="range-tab active" data-metric="value" data-i18n="chart.metricValue">評価額</button>
+                  <button class="range-tab" data-metric="quantity" data-i18n="chart.metricQuantity">保有数</button>
+                </div>
+                <div class="range-tabs" id="cs-asset-range-tabs">
+                  <button class="range-tab" data-range="7d">7D</button>
+                  <button class="range-tab" data-range="30d">30D</button>
+                  <button class="range-tab active" data-range="90d">90D</button>
+                  <button class="range-tab" data-range="1y">1Y</button>
+                  <button class="range-tab" data-range="all">ALL</button>
+                </div>
               </div>
             </div>
             <div class="history-chart-wrap">
@@ -579,13 +585,20 @@
 
           <section class="card history-card">
             <div class="history-header">
-              <h2 data-i18n="label.priceHistorySection">価格推移</h2>
-              <div class="range-tabs" id="sec-range-tabs">
-                <button class="range-tab" data-range="7d">7D</button>
-                <button class="range-tab" data-range="30d">30D</button>
-                <button class="range-tab" data-range="90d">90D</button>
-                <button class="range-tab active" data-range="1y">1Y</button>
-                <button class="range-tab" data-range="all">ALL</button>
+              <h2 id="sec-history-title" data-i18n="label.priceHistorySection">価格推移</h2>
+              <div class="history-controls">
+                <div class="range-tabs metric-tabs" id="sec-metric-tabs">
+                  <button class="range-tab active" data-metric="price" data-i18n="chart.metricPrice">価格</button>
+                  <button class="range-tab" data-metric="value" data-i18n="chart.metricValue">評価額</button>
+                  <button class="range-tab" data-metric="quantity" data-i18n="chart.metricQuantity">保有数</button>
+                </div>
+                <div class="range-tabs" id="sec-range-tabs">
+                  <button class="range-tab" data-range="7d">7D</button>
+                  <button class="range-tab" data-range="30d">30D</button>
+                  <button class="range-tab" data-range="90d">90D</button>
+                  <button class="range-tab active" data-range="1y">1Y</button>
+                  <button class="range-tab" data-range="all">ALL</button>
+                </div>
               </div>
             </div>
             <div class="history-chart-wrap">
@@ -593,6 +606,7 @@
               <p class="history-empty hidden" data-i18n="label.noPriceData">価格データがありません</p>
             </div>
             <div id="price-history-loading" class="loading hidden" data-i18n="label.loading">読み込み中…</div>
+            <div id="sec-history-note" class="history-unpriced hidden"></div>
           </section>
 
           <div class="stat-tiles">

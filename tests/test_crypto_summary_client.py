@@ -338,6 +338,22 @@ def test_merge_history_forward_fill_and_no_backfill():
     assert all(p["cost"] == D("50") for p in points)
 
 
+def test_cs_history_points_renames_balance_to_quantity():
+    """CS の残高 balance を、AS の推移点の保有数 quantity として渡す。"""
+    pts = csc.cs_history_points(
+        [
+            {"t": "2026-08-01", "value": "4400000", "balance": "0.3"},
+            "garbage",
+            {"t": "2026-08-02", "value": "4500000"},   # balance を返さない CS
+        ]
+    )
+    assert pts == [
+        {"t": "2026-08-01", "value": "4400000", "quantity": "0.3"},
+        {"t": "2026-08-02", "value": "4500000", "quantity": None},
+    ]
+    assert csc.cs_history_points(None) == []
+
+
 def test_merge_history_empty_or_garbage():
     points = [{"t": "2026-08-01", "value": D("100"), "cost": None}]
     assert csc.merge_cs_history(points, None) is False
