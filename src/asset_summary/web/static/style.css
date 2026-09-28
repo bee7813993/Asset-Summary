@@ -440,6 +440,17 @@ tr.transfer-focus td { background: color-mix(in srgb, var(--accent) 12%, transpa
 /* 銘柄詳細の移管のカード（移管タブへのリンク・判断のあとの取り消し） */
 .transfer-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 10px; font-size: 13px; }
 #sec-transfer-undo:empty { display: none; }
+/* 取引の一覧: 見出しと、並び順（古い順／新しい順）・表示（一覧／月ごと）の切替 */
+.tx-list-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; margin-bottom: 14px; }
+.tx-list-head h2 { margin-bottom: 0; }
+.tx-view-bar { display: flex; flex-wrap: wrap; gap: 8px; }
+/* 月ごと: 月の見出し行（押すとその月の取引を開閉する） */
+tr.tx-month-row td { background: var(--bg-elev); font-weight: 600; cursor: pointer; }
+tr.tx-month-row:hover td, tr.tx-month-row:focus-visible td { color: var(--accent); }
+tr.tx-month-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.tx-month-label { white-space: nowrap; }
+.tx-month-chev { display: inline-block; width: 1.2em; color: var(--text-dim); }
+.tx-month-types { font-weight: 400; color: var(--text-dim); margin-left: 6px; }
 /* 銘柄詳細から取引タブへ来たとき、入れておいた値がどこから来たかの案内 */
 .mtx-prefill {
   font-size: 13px; color: var(--text); margin: -4px 0 14px; padding: 8px 12px;

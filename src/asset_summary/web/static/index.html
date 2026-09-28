@@ -704,7 +704,10 @@
 
           <!-- 取引履歴 -->
           <section id="tx-history-card" class="card hidden">
-            <h2 data-i18n="tx.historyTitle">取引履歴</h2>
+            <div class="tx-list-head">
+              <h2 data-i18n="tx.historyTitle">取引履歴</h2>
+              <div id="tx-history-view" class="tx-view-bar"></div>
+            </div>
             <div class="table-wrap">
               <table id="tx-history-table">
                 <thead>
@@ -1187,7 +1190,10 @@
 
           <!-- 取引プレビュー -->
           <section id="tx-preview" class="card import-section hidden">
-            <h2 data-i18n="tx.previewTitle">取引プレビュー</h2>
+            <div class="tx-list-head">
+              <h2 data-i18n="tx.previewTitle">取引プレビュー</h2>
+              <div id="tx-rows-view" class="tx-view-bar"></div>
+            </div>
             <div id="tx-preview-summary" class="import-note"></div>
             <div id="tx-type-bulk" class="settings-row hidden">
               <span id="tx-type-bulk-note" class="import-note"></span>
@@ -1424,7 +1430,10 @@
           </section>
 
           <section class="card import-section">
-            <h2 data-i18n="manage.txListTitle">登録済みの取引（手動）</h2>
+            <div class="tx-list-head">
+              <h2 data-i18n="manage.txListTitle">登録済みの取引（手動）</h2>
+              <div id="manage-tx-view" class="tx-view-bar"></div>
+            </div>
             <p class="card-hint" data-i18n="manage.txListHint">ここで登録した取引だけが出ます。取り込んだ取引履歴は、データ取込の取込履歴からファイルごと巻き戻します。</p>
             <div class="table-wrap">
               <table id="manage-tx-table">

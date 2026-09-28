@@ -1506,7 +1506,9 @@ class Store:
         origin: str | None = None,
         limit: int | None = None,
         offset: int = 0,
+        descending: bool = False,
     ) -> list[Transaction]:
+        """約定日の順（同じ日は登録順）。descending なら新しい順（同じ日も逆順）。"""
         clauses, params = [], []
         if security_id is not None:
             clauses.append("security_id = ?")
@@ -1521,7 +1523,11 @@ class Store:
             clauses.append("origin = ?")
             params.append(origin)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        sql = f"SELECT * FROM transactions {where} ORDER BY trade_date, id"
+        direction = "DESC" if descending else "ASC"
+        sql = (
+            f"SELECT * FROM transactions {where} "
+            f"ORDER BY trade_date {direction}, id {direction}"
+        )
         if limit is not None:
             sql += f" LIMIT {int(limit)} OFFSET {int(offset)}"
         with self.connect() as conn:

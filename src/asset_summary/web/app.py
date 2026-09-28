@@ -2340,12 +2340,15 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
         security_id: int,
         limit: int = Query(200, ge=1, le=500),
         offset: int = Query(0, ge=0),
+        order: str = Query("asc", pattern="^(asc|desc)$"),
     ) -> dict[str, Any]:
+        """銘柄の取引履歴。order=desc で新しい順（ページ送りもその順で）。"""
         if store.get_security(security_id) is None:
             raise HTTPException(status_code=404, detail="銘柄が見つかりません")
         accounts = {a.id: a for a in store.list_accounts()}
         txs = store.list_transactions(
-            security_id=security_id, limit=limit, offset=offset
+            security_id=security_id, limit=limit, offset=offset,
+            descending=order == "desc",
         )
         return {
             "transactions": [_ser_transaction(t, accounts) for t in txs],

@@ -3179,9 +3179,180 @@ function txThreshold(key, fallback) {
   return typeof th[key] === "number" ? th[key] : fallback;
 }
 let _txHistoryOffset = 0;
+let _txHistReq = 0;             // 並び順・表示を続けて変えたとき、古い応答で描かない
+let _txHistCtx = null;          // {securityId, secCur, currency} — 切替で読み直すため
+const _txHistOpen = new Set();  // 月ごとの表示で開いている月（"YYYY-MM"）
+let _manualTxRows = [];
+const _manualTxOpen = new Set();
+const _txPreviewOpen = new Set();
 
 function txTypeLabel(kind) {
   return t(`tx.type.${kind}`) || kind;
+}
+
+// ---- 取引の一覧（並び順・月ごとの表示） ----
+// 銘柄詳細の取引履歴・手動の取引・取込プレビューで共通。並び順（約定日の古い順／
+// 新しい順）と表示（一覧／月ごと）は、一覧ごとに覚える
+
+function _txListPref(key) {
+  return {
+    order: _loadChoice(`as_tx_order_${key}`, ["asc", "desc"], "asc"),
+    view: _loadChoice(`as_tx_view_${key}`, ["list", "month"], "list"),
+  };
+}
+
+/** 並び順と表示の切替を el に作る。変えると覚えて onChange() を呼ぶ。 */
+function _mountTxViewBar(el, key, onChange) {
+  const groups = [
+    { name: "order", title: "tx.orderLabel", values: [["asc", "tx.orderAsc"], ["desc", "tx.orderDesc"]] },
+    { name: "view", title: "tx.viewLabel", values: [["list", "tx.viewList"], ["month", "tx.viewMonth"]] },
+  ];
+  el.innerHTML = "";
+  groups.forEach((g) => {
+    const box = document.createElement("div");
+    box.className = "range-tabs";
+    box.dataset.name = g.name;
+    box.setAttribute("role", "group");
+    box.setAttribute("data-i18n-title", g.title);
+    box.title = t(g.title);
+    g.values.forEach(([value, label]) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "range-tab";
+      b.dataset.value = value;
+      b.setAttribute("data-i18n", label);
+      b.textContent = t(label);
+      b.addEventListener("click", () => {
+        if (_txListPref(key)[g.name] === value) return;
+        localStorage.setItem(`as_tx_${g.name}_${key}`, value);
+        _syncTxViewBar(el, key);
+        onChange();
+      });
+      box.appendChild(b);
+    });
+    el.appendChild(box);
+  });
+  _syncTxViewBar(el, key);
+}
+
+function _syncTxViewBar(el, key) {
+  const pref = _txListPref(key);
+  el.querySelectorAll(".range-tabs").forEach((box) => {
+    box.querySelectorAll(".range-tab").forEach((b) => {
+      const on = b.dataset.value === pref[box.dataset.name];
+      b.classList.toggle("active", on);
+      b.setAttribute("aria-pressed", String(on));
+    });
+  });
+}
+
+/** 約定日の順に並べる（同じ日は元の順）。新しい順は全体を逆にする（同じ日も後の行が先）。 */
+function _sortTxRows(rows, order, dateOf) {
+  const keyed = rows.map((r, i) => ({ r, i, d: String(dateOf(r) || "") }));
+  keyed.sort((a, b) => (a.d < b.d ? -1 : a.d > b.d ? 1 : a.i - b.i));
+  const out = keyed.map((k) => k.r);
+  return order === "desc" ? out.reverse() : out;
+}
+
+function _fmtMonth(ym) {
+  const m = /^(\d{4})-(\d{2})$/.exec(ym || "");
+  if (!m) return t("tx.noDate");
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  return _lang === "en"
+    ? new Date(Date.UTC(y, mo - 1, 1)).toLocaleString("en-US", {
+      year: "numeric", month: "short", timeZone: "UTC",
+    })
+    : `${y}年${mo}月`;
+}
+
+/** 月の見出しに出す要約: 件数・種類ごとの件数・受渡金額の合計（通貨ごと）。 */
+function _txMonthSummary(rows, { typeOf, amountOf, currencyOf }) {
+  const types = new Map();
+  const sums = new Map();
+  rows.forEach((r) => {
+    const ty = typeOf(r) || "other";
+    types.set(ty, (types.get(ty) || 0) + 1);
+    const raw = amountOf(r);
+    const n = Number(raw);
+    if (raw !== null && raw !== undefined && raw !== "" && isFinite(n)) {
+      const c = currencyOf(r) || "JPY";
+      sums.set(c, (sums.get(c) || 0) + n);
+    }
+  });
+  return {
+    count: t(rows.length === 1 ? "tx.monthCountOne" : "tx.monthCount", { n: rows.length }),
+    types: [...types].map(([ty, n]) => `${txTypeLabel(ty)} ${n}`).join("・"),
+    amount: [...sums].map(([c, v]) => fmtMoney(v, c)).join(" / ") || "—",
+  };
+}
+
+/**
+ * 取引の行を tbody に描く。view が "month" なら月の見出し行の下にまとめ、見出しを
+ * 押す（Enter・Space でも）とその月の行を開閉する。閉じた行も DOM には残す
+ * （取込プレビューは取り込む行をチェックから読む）。
+ *   makeRow(r) → <tr>。monthCells(見出しの HTML, 要約) → 見出し行の <td> 群の HTML
+ *   open: 開いている月（"YYYY-MM"）の Set。描き直しても開いたままにする
+ */
+function _renderTxList(tbody, rows, opts) {
+  const { order, view, dateOf, makeRow, monthCells, open } = opts;
+  tbody.innerHTML = "";
+  const sorted = _sortTxRows(rows, order, dateOf);
+  if (view !== "month") {
+    sorted.forEach((r) => tbody.appendChild(makeRow(r)));
+    return;
+  }
+  const months = [];
+  sorted.forEach((r) => {
+    const ym = String(dateOf(r) || "").slice(0, 7);
+    const last = months[months.length - 1];
+    if (last && last.ym === ym) last.rows.push(r);
+    else months.push({ ym, rows: [r] });
+  });
+  months.forEach(({ ym, rows: members }) => {
+    const head = document.createElement("tr");
+    head.className = "tx-month-row";
+    head.tabIndex = 0;
+    head.title = t("tx.monthToggle");
+    head.innerHTML = monthCells(
+      `<span class="tx-month-chev" aria-hidden="true"></span>${escapeHtml(_fmtMonth(ym))}`,
+      _txMonthSummary(members, opts));
+    const trs = members.map((r) => {
+      const tr = makeRow(r);
+      tr.classList.add("tx-month-member");
+      return tr;
+    });
+    const show = (on) => {
+      head.setAttribute("aria-expanded", String(on));
+      head.querySelector(".tx-month-chev").textContent = on ? "▾" : "▸";
+      trs.forEach((tr) => tr.classList.toggle("hidden", !on));
+    };
+    const toggle = () => {
+      const on = !open.has(ym);
+      if (on) open.add(ym);
+      else open.delete(ym);
+      show(on);
+    };
+    head.addEventListener("click", toggle);
+    head.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        toggle();
+      }
+    });
+    show(open.has(ym));
+    tbody.appendChild(head);
+    trs.forEach((tr) => tbody.appendChild(tr));
+  });
+}
+
+/** 月の見出し行: 見出し・件数と種類・受渡金額の合計を、表の列にそろえて置く。 */
+function _txMonthCells(labelSpan, countSpan, afterAmount) {
+  return (label, s) => `
+    <td class="tx-month-label" colspan="${labelSpan}">${label}</td>
+    <td colspan="${countSpan}">${escapeHtml(s.count)} <span class="tx-month-types">${escapeHtml(s.types)}</span></td>
+    <td class="num">${escapeHtml(s.amount)}</td>
+    ${afterAmount ? `<td colspan="${afterAmount}"></td>` : ""}`;
 }
 
 function coverageLabel(coverage) {
@@ -3671,34 +3842,50 @@ function renderTxRows(rows) {
     tbody.innerHTML = `<tr><td colspan="9" class="muted">${t("label.noData")}</td></tr>`;
     return;
   }
-  rows.forEach((r) => {
-    let status = t("tx.statusNew");
-    // 信用取引は設計上の対象外。「銘柄未確定」「要確認」と出すと対処が要るように
-    // 読めるが、実際にやることは無い。専用の状態にして ⚠ からも外す。
-    const isMargin = !!(r.raw || {}).margin;
-    if (isMargin) status = t("tx.statusMargin");
-    else if (r.cash_only) status = t("tx.statusCashOnly");
-    else if (r.duplicate) status = t("tx.statusDuplicate");
-    else if (r.register_as_new) status = t("tx.statusRegisterSold");
-    else if (r.security_id == null) status = t("tx.statusUnmatched");
-    else if (!r.included) status = t("tx.statusLowConfidence");
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td><input type="checkbox" class="tx-row-check" data-key="${escapeHtml(r.dedup_key)}"${r.included ? " checked" : ""}${r.duplicate ? " disabled" : ""} /></td>
-      <td>${escapeHtml(r.trade_date || "")}</td>
-      <td>${escapeHtml(txTypeLabel(r.tx_type))}</td>
-      <td>${escapeHtml(r.security_name || "")}</td>
-      <td class="num">${fmtAmount(r.quantity)}</td>
-      <td class="num">${fmtPrice(r.unit_price, r.currency)}</td>
-      <td class="num">${fmtMoney(r.net_amount, r.currency)}</td>
-      <td>${escapeHtml(r.lot_label || "")}</td>
-      <td>${escapeHtml(status)}${(() => {
-        const warns = (r.warnings || []).filter((w) => !(isMargin && w.includes("信用取引")));
-        return warns.length ? ` <span class="muted" title="${escapeHtml(warns.join(" / "))}">⚠</span>` : "";
-      })()}</td>
-    `;
-    tbody.appendChild(tr);
+  _renderTxList(tbody, rows, {
+    ..._txListPref("import"),
+    dateOf: (r) => r.trade_date,
+    typeOf: (r) => r.tx_type,
+    amountOf: (r) => r.net_amount,
+    currencyOf: (r) => r.currency,
+    open: _txPreviewOpen,
+    monthCells: _txMonthCells(2, 4, 2),
+    makeRow: _txPreviewRow,
   });
+}
+
+function _txPreviewRow(r) {
+  let status = t("tx.statusNew");
+  // 信用取引は設計上の対象外。「銘柄未確定」「要確認」と出すと対処が要るように
+  // 読めるが、実際にやることは無い。専用の状態にして ⚠ からも外す。
+  const isMargin = !!(r.raw || {}).margin;
+  if (isMargin) status = t("tx.statusMargin");
+  else if (r.cash_only) status = t("tx.statusCashOnly");
+  else if (r.duplicate) status = t("tx.statusDuplicate");
+  else if (r.register_as_new) status = t("tx.statusRegisterSold");
+  else if (r.security_id == null) status = t("tx.statusUnmatched");
+  else if (!r.included) status = t("tx.statusLowConfidence");
+  const tr = document.createElement("tr");
+  tr.innerHTML = `
+    <td><input type="checkbox" class="tx-row-check" data-key="${escapeHtml(r.dedup_key)}"${(r.checked ?? r.included) ? " checked" : ""}${r.duplicate ? " disabled" : ""} /></td>
+    <td>${escapeHtml(r.trade_date || "")}</td>
+    <td>${escapeHtml(txTypeLabel(r.tx_type))}</td>
+    <td>${escapeHtml(r.security_name || "")}</td>
+    <td class="num">${fmtAmount(r.quantity)}</td>
+    <td class="num">${fmtPrice(r.unit_price, r.currency)}</td>
+    <td class="num">${fmtMoney(r.net_amount, r.currency)}</td>
+    <td>${escapeHtml(r.lot_label || "")}</td>
+    <td>${escapeHtml(status)}${(() => {
+      const warns = (r.warnings || []).filter((w) => !(isMargin && w.includes("信用取引")));
+      return warns.length ? ` <span class="muted" title="${escapeHtml(warns.join(" / "))}">⚠</span>` : "";
+    })()}</td>
+  `;
+  // 並べ替え・月ごとの切替で描き直しても、付け外ししたチェックが戻らないよう行に持たせる
+  // （included は取り込めるかの判定で、状態の表示にも使うので書き換えない）
+  tr.querySelector(".tx-row-check").addEventListener("change", (e) => {
+    r.checked = e.target.checked;
+  });
+  return tr;
 }
 
 async function remapTxPreview() {
@@ -3761,6 +3948,7 @@ async function commitTxBatch() {
 
 function resetTxForm() {
   _txPreview = null;
+  _txPreviewOpen.clear();
   _txSecurityMap = {};
   _txNewSecurities = new Set();
   _txAutoLinked = new Set();
@@ -3859,24 +4047,14 @@ async function loadTransactionHistory(securityId, secCur, currency, append) {
   const card = document.getElementById("tx-history-card");
   const tbody = document.querySelector("#tx-history-table tbody");
   const more = document.getElementById("tx-history-more");
+  const req = ++_txHistReq;
+  const pref = _txListPref("history");
   if (!append) {
+    if (!_txHistCtx || _txHistCtx.securityId !== securityId) _txHistOpen.clear();
+    _txHistCtx = { securityId, secCur, currency };
     _txHistoryOffset = 0;
-    tbody.innerHTML = "";
   }
-  let data;
-  try {
-    data = await fetchJSON(
-      `/api/securities/${securityId}/transactions?limit=50&offset=${_txHistoryOffset}`);
-  } catch (e) {
-    card.classList.add("hidden");
-    return;
-  }
-  if (!data.total) {
-    card.classList.add("hidden");
-    return;
-  }
-  card.classList.remove("hidden");
-  (data.transactions || []).forEach((tx) => {
+  const makeRow = (tx) => {
     const tr = document.createElement("tr");
     tr.innerHTML = `
       <td>${escapeHtml(tx.trade_date)}</td>
@@ -3888,8 +4066,59 @@ async function loadTransactionHistory(securityId, secCur, currency, append) {
       <td class="num">${fmtMoney(tx.net_amount, tx.currency || currency)}</td>
       <td>${escapeHtml(tx.lot_label || "")}</td>
     `;
-    tbody.appendChild(tr);
-  });
+    return tr;
+  };
+  const url = (limit, offset, order) =>
+    `/api/securities/${securityId}/transactions?limit=${limit}&offset=${offset}&order=${order}`;
+
+  if (pref.view === "month") {
+    // 月ごとは月の合計を出すので全件を読む（ページ送りはしない）
+    let all = [];
+    let total = 0;
+    try {
+      do {
+        const data = await fetchJSON(url(500, all.length, "asc"));
+        if (req !== _txHistReq) return;
+        total = data.total || 0;
+        const got = data.transactions || [];
+        if (!got.length) break;
+        all = all.concat(got);
+      } while (all.length < total);
+    } catch (e) {
+      if (req === _txHistReq) card.classList.add("hidden");
+      return;
+    }
+    card.classList.toggle("hidden", !total);
+    more.classList.add("hidden");
+    _renderTxList(tbody, all, {
+      ...pref,
+      dateOf: (tx) => tx.trade_date,
+      typeOf: (tx) => tx.tx_type,
+      amountOf: (tx) => tx.net_amount,
+      currencyOf: (tx) => tx.currency || currency,
+      open: _txHistOpen,
+      monthCells: _txMonthCells(1, 4, 1),
+      makeRow,
+    });
+    return;
+  }
+
+  let data;
+  try {
+    data = await fetchJSON(url(50, _txHistoryOffset, pref.order));
+  } catch (e) {
+    if (req === _txHistReq) card.classList.add("hidden");
+    return;
+  }
+  if (req !== _txHistReq) return;
+  if (!append) tbody.innerHTML = "";
+  if (!data.total) {
+    card.classList.add("hidden");
+    return;
+  }
+  card.classList.remove("hidden");
+  // 一覧は API の順（約定日の古い順／新しい順）のままページ送りする
+  (data.transactions || []).forEach((tx) => tbody.appendChild(makeRow(tx)));
   _txHistoryOffset += (data.transactions || []).length;
   more.classList.toggle("hidden", _txHistoryOffset >= data.total);
   more.onclick = () => loadTransactionHistory(securityId, secCur, currency, true);
@@ -5024,11 +5253,30 @@ async function loadManualTransactions() {
   tbody.innerHTML = `<tr><td colspan="8" class="loading">${t("label.loading")}</td></tr>`;
   try {
     const data = await fetchJSON("/api/transactions/manual");
-    const rows = data.transactions || [];
-    tbody.innerHTML = "";
-    const classById = {};
-    _securities.forEach((s) => { classById[s.id] = s.asset_class; });
-    rows.forEach((tx) => {
+    _manualTxRows = data.transactions || [];
+    _renderManualTxRows();
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="8" class="muted">${t("status.error")}${escapeHtml(e.message)}</td></tr>`;
+  }
+}
+
+function _renderManualTxRows() {
+  const tbody = document.querySelector("#manage-tx-table tbody");
+  if (!_manualTxRows.length) {
+    tbody.innerHTML = `<tr><td colspan="8" class="muted">${t("manage.txNone")}</td></tr>`;
+    return;
+  }
+  const classById = {};
+  _securities.forEach((s) => { classById[s.id] = s.asset_class; });
+  _renderTxList(tbody, _manualTxRows, {
+    ..._txListPref("manual"),
+    dateOf: (tx) => tx.trade_date,
+    typeOf: (tx) => tx.tx_type,
+    amountOf: (tx) => tx.net_amount,
+    currencyOf: (tx) => tx.currency,
+    open: _manualTxOpen,
+    monthCells: _txMonthCells(1, 5, 1),
+    makeRow: (tx) => {
       const type = txTypeLabel(tx.tx_type);
       const qd = qtyDigits(classById[tx.security_id]);
       const tr = document.createElement("tr");
@@ -5055,15 +5303,18 @@ async function loadManualTransactions() {
           }
         );
       });
-      tbody.appendChild(tr);
-    });
-    if (rows.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="8" class="muted">${t("manage.txNone")}</td></tr>`;
-    }
-  } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="8" class="muted">${t("status.error")}${escapeHtml(e.message)}</td></tr>`;
-  }
+      return tr;
+    },
+  });
 }
+
+// 並び順・表示の切替（一覧ごとに覚える）
+_mountTxViewBar(document.getElementById("tx-history-view"), "history", () => {
+  if (_txHistCtx) loadTransactionHistory(_txHistCtx.securityId, _txHistCtx.secCur, _txHistCtx.currency);
+});
+_mountTxViewBar(document.getElementById("manage-tx-view"), "manual", _renderManualTxRows);
+_mountTxViewBar(document.getElementById("tx-rows-view"), "import",
+  () => renderTxRows((_txPreview && _txPreview.rows) || []));
 
 document.getElementById("mtx-save").addEventListener("click", async () => {
   hideResult("mtx-result");
