@@ -43,12 +43,16 @@ ME の PDF は「いま何株持っているか」を正確に持っている。
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
-from typing import Any, Iterable, Sequence
+from typing import TYPE_CHECKING, Any, Iterable, Sequence
 
 from .models import Coverage, HoldingSnapshot, Security, Transaction, TxType
+
+if TYPE_CHECKING:
+    from .transfers import TransferLink
 
 ZERO = Decimal("0")
 
@@ -219,6 +223,25 @@ def _ordered(txs: Iterable[Transaction]) -> list[Transaction]:
     )
 
 
+def _quantity_step(tx: Transaction) -> tuple[Decimal, Decimal] | None:
+    """取引が保有数をどう動かすか: (倍率, 増減) で 後 = 前 × 倍率 + 増減。
+
+    保有数を動かさない取引（配当・元本払戻・現金の出入りなど）は None。
+    数量の符号はファイルの書き方に左右されるので、種別で決める。
+    """
+    if tx.tx_type in (TxType.BUY, TxType.REINVEST, TxType.TRANSFER_IN):
+        return (Decimal(1), _abs(tx.quantity))
+    if tx.tx_type in (TxType.SELL, TxType.TRANSFER_OUT):
+        return (Decimal(1), -_abs(tx.quantity))
+    if tx.tx_type is TxType.SPLIT:
+        ratio = _split_ratio(tx)
+        if ratio is not None:
+            return (ratio, ZERO)
+        if tx.quantity is not None:
+            return (Decimal(1), tx.quantity)
+    return None
+
+
 # ----------------------------------------------------------------------
 # 突合本体
 # ----------------------------------------------------------------------
@@ -277,17 +300,11 @@ def reconcile_group(
     # ---- パス1: 数量。q_A = α·q0 + β
     alpha, beta = Decimal(1), ZERO
     for tx in usable:
-        if tx.tx_type in (TxType.BUY, TxType.REINVEST, TxType.TRANSFER_IN):
-            beta += _abs(tx.quantity)
-        elif tx.tx_type in (TxType.SELL, TxType.TRANSFER_OUT):
-            beta -= _abs(tx.quantity)
-        elif tx.tx_type is TxType.SPLIT:
-            ratio = _split_ratio(tx)
-            if ratio is not None:
-                alpha *= ratio
-                beta *= ratio
-            elif tx.quantity is not None:
-                beta += tx.quantity
+        step = _quantity_step(tx)
+        if step is not None:
+            mult, delta = step
+            alpha *= mult
+            beta = beta * mult + delta
 
     if alpha == 0:
         result.warnings.append(
@@ -737,3 +754,277 @@ def reconcile_all(
             )
         )
     return (results, warnings)
+
+
+# ----------------------------------------------------------------------
+# 推移グラフ用: 最初のスナップショットより前の保有数
+# ----------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class QuantityPath:
+    """口座×銘柄の、最初のスナップショットより前の保有数（取引履歴から逆算）。
+
+    before（最初のスナップショットの日）より前にだけ使う。それ以降は
+    スナップショットが正。changes は (約定日, その日からの保有数) の昇順で、
+    最初の約定日より前は opening ＝ 取引履歴より前から持っていた分（期首ロット）。
+    期首ロットはいつから持っていたか判らないので、記録ではなく遡った数量として
+    扱う。完全被覆なら opening は 0 で、最初の買付より前は持っていない。
+
+    スナップショットの無い口座×銘柄（売り切った・移管した、今は持っていない保有）
+    では before が date.max で、全期間を取引履歴の数量で描く。
+    """
+
+    before: date
+    changes: tuple[tuple[date, Decimal], ...]
+    opening: Decimal
+
+    def at(self, day: date) -> tuple[Decimal, bool]:
+        """(その日の保有数, 記録ではなく遡った数量か)。"""
+        i = bisect_right(self.changes, day, key=lambda c: c[0])
+        if i == 0:
+            return (self.opening, self.opening > QTY_EPSILON)
+        return (self.changes[i - 1][1], False)
+
+
+def quantity_paths(
+    transactions: Sequence[Transaction],
+    snapshots: Sequence[HoldingSnapshot],
+    links: Sequence["TransferLink"] = (),
+) -> dict[tuple[int, int], QuantityPath]:
+    """口座×銘柄ごとに、最初のスナップショットより前の保有数を取引履歴から戻す。
+
+    推移グラフ（銘柄詳細の保有数・評価額）で、最初の取込より前を「最初の
+    保有数のまま」ではなく実際の数量で描くための材料。スナップショットを錨に、
+    約定を新しい順に打ち消しながらさかのぼる。錨の数量はそのまま残るので、
+    取込の前後で線はつながる。
+
+    links（口座間の移管。core/transfers.py）の移管先は、最初のスナップショット
+    より前を「移管の日から移ってきた数量、それより前は持っていない」で描く。
+    移管先の取引履歴のうち移管が届いたものとして数えた入庫（link.absorbed。元の
+    取得日の日付で記録された入庫など）は外し、移管の日の仮の入庫に置き換える。
+
+    スナップショットの無い口座×銘柄（売り切った・移管した、今は持っていない
+    保有）は、今は 0 という事実を錨に取引履歴だけで全期間を描く。
+
+    次の口座×銘柄は作らない（呼び出し側は従来どおり最初の保有数で遡る）:
+    - 最初のスナップショットより前の約定も移管も無い（さかのぼる材料が無い）
+    - ロットごとに記録の始まる日が違う（後から現れたロットが買付なのか、
+      既存の保有が行を分けただけなのかを決められない）
+    - さかのぼる途中で保有数が負になる（二重取込・売却行の欠落・銘柄の誤照合。
+      スナップショットと合わない数字は描かない）。スナップショットの無い
+      口座×銘柄では、取引履歴の上でまだ持っていることになるもの
+    """
+    snaps_by_group: dict[tuple[int, int], list[HoldingSnapshot]] = {}
+    for s in snapshots:
+        snaps_by_group.setdefault((s.account_id, s.security_id), []).append(s)
+    absorbed = {k for link in links for k in link.absorbed}
+    txs_by_group: dict[tuple[int, int], list[Transaction]] = {}
+    for tx in transactions:
+        if tx.security_id is None or _quantity_step(tx) is None:
+            continue
+        if absorbed and _tx_key(tx) in absorbed:
+            continue    # 移管の日の仮の入庫として数える
+        txs_by_group.setdefault((tx.account_id, tx.security_id), []).append(tx)
+    links_into: dict[tuple[int, int], list[TransferLink]] = {}
+    links_out: dict[tuple[int, int], list[TransferLink]] = {}
+    for link in links:
+        links_into.setdefault((link.to_account_id, link.security_id), []).append(link)
+        links_out.setdefault((link.from_account_id, link.security_id), []).append(link)
+
+    out: dict[tuple[int, int], QuantityPath] = {}
+    for key, snaps in snaps_by_group.items():
+        txs = txs_by_group.get(key, [])
+        incoming = links_into.get(key, [])
+        if not txs and not incoming:
+            continue
+        path, _status = _group_quantity_path(snaps, _ordered(txs), incoming)
+        if path is not None:
+            out[key] = path
+    # スナップショットの無い口座×銘柄。移管で経由しただけの口座（記録の無い
+    # 口座を手動で結び付けた場合）は、出入りを仮の入庫・出庫で補う
+    for key in (set(txs_by_group) | set(links_into)) - set(snaps_by_group):
+        txs = list(txs_by_group.get(key, []))
+        txs += [_virtual_transfer(link, TxType.TRANSFER_IN) for link in links_into.get(key, [])
+                if not _has_transfer(txs, link, TxType.TRANSFER_IN)]
+        txs += [_virtual_transfer(link, TxType.TRANSFER_OUT) for link in links_out.get(key, [])
+                if not _has_transfer(txs, link, TxType.TRANSFER_OUT)]
+        path = _closed_group_path(_ordered(txs))
+        if path is not None:
+            out[key] = path
+    return out
+
+
+def _tx_key(t: Transaction) -> tuple[str, int]:
+    """取引の同一性（transfers.tx_key と同じ。循環 import を避けて複製）。"""
+    return ("id", t.id) if t.id is not None else ("obj", id(t))
+
+
+def _closed_group_path(txs: list[Transaction]) -> QuantityPath | None:
+    """スナップショットの無い口座×銘柄の全期間の保有数（今は 0 を錨に戻す）。"""
+    by_day: dict[date, list[Transaction]] = {}
+    for t in txs:
+        by_day.setdefault(t.trade_date, []).append(t)
+    q = ZERO
+    changes: list[tuple[date, Decimal]] = []
+    for day in sorted(by_day, reverse=True):
+        changes.append((day, q))
+        for t in reversed(by_day[day]):
+            mult, delta = _quantity_step(t)
+            q = (q - delta) / mult
+        if q < -QTY_EPSILON:
+            return None
+        if abs(q) <= QTY_EPSILON:
+            q = ZERO
+    changes.reverse()
+    return QuantityPath(before=date.max, changes=tuple(changes), opening=q)
+
+
+def _virtual_transfer(link: "TransferLink", tx_type: TxType) -> Transaction:
+    """移管を仮の入庫（移管先）・出庫（移管元）にする。台帳には書かない（推移の計算用）。"""
+    incoming = tx_type is TxType.TRANSFER_IN
+    return Transaction(
+        dedup_key=f"transfer:{link.from_account_id}:{link.date.isoformat()}",
+        account_id=link.to_account_id if incoming else link.from_account_id,
+        security_id=link.security_id,
+        trade_date=link.date,
+        tx_type=tx_type,
+        quantity=link.quantity if incoming else -link.quantity,
+        origin="transfer",
+    )
+
+
+def _linked_path(
+    held: Decimal, first: date, incoming: Sequence["TransferLink"]
+) -> tuple[QuantityPath | None, str]:
+    """取引履歴の無い移管先の、最初のスナップショットより前の保有数。
+
+    最初のスナップショットの数量から移ってきた数量を引いた残りが、移管より前から
+    その口座にあった分（期首ロット。遡った数量として破線で描く）。移管の日が
+    最初のスナップショットの日と同じ（記録の上で消えた日と現れた日が同じ）なら、
+    その日の記録に移ってきた分が含まれている。
+    """
+    arrived = sorted(
+        (link.date, link.quantity) for link in incoming if link.date <= first
+    )
+    if not arrived:
+        return (None, "no_earlier_trades")
+    opening = held - sum((q for _d, q in arrived), ZERO)
+    if opening < -QTY_EPSILON:
+        return (None, "inconsistent")
+    if abs(opening) <= QTY_EPSILON:
+        opening = ZERO
+    q = opening
+    changes: list[tuple[date, Decimal]] = []
+    for day, quantity in arrived:
+        q += quantity
+        if day >= first:
+            continue
+        if changes and changes[-1][0] == day:
+            changes[-1] = (day, q)
+        else:
+            changes.append((day, q))
+    return (QuantityPath(before=first, changes=tuple(changes), opening=opening), "linked")
+
+
+def _has_transfer(txs: Sequence[Transaction], link: "TransferLink", tx_type: TxType) -> bool:
+    """移管の日の前後（7 日前〜30 日後）にその向きの移動の記録が取引履歴にあるか。
+
+    数量は比べない — 移管元は貸株の出し入れと移管の出庫が同じ日に何行にも分かれて
+    いることがあり、1 行ずつでは移管の数量にならない。
+    """
+    lo, hi = link.date - timedelta(days=7), link.date + timedelta(days=30)
+    return any(t.tx_type is tx_type and lo <= t.trade_date <= hi for t in txs)
+
+
+def quantity_path_status(
+    transactions: Sequence[Transaction],
+    snapshots: Sequence[HoldingSnapshot],
+    account_id: int,
+    security_id: int,
+) -> str:
+    """口座×銘柄の取引が推移グラフに使われるか。使われないならその理由。
+
+    traced（使う）/ closed（記録は無いが、今は持っていない保有として取引だけで
+    描く — 買って売り切った・移管した）/ no_snapshot（その口座にその銘柄の記録が無い）/
+    no_trades / no_earlier_trades（最初の取込より前の取引が無い）/
+    lots_differ / inconsistent。手動登録の直後に、入れた取引がグラフに
+    届いたかを利用者へ返すためのもの（判定は quantity_paths と同じ）。
+    """
+    key = (account_id, security_id)
+    snaps = [s for s in snapshots if (s.account_id, s.security_id) == key]
+    txs = [
+        t for t in transactions
+        if (t.account_id, t.security_id) == key and _quantity_step(t) is not None
+    ]
+    if not snaps:
+        # 今は持っていない保有として取引履歴だけで描けるか（買って売り切った等）
+        if txs and _closed_group_path(_ordered(txs)) is not None:
+            return "closed"
+        return "no_snapshot"
+    if not txs:
+        return "no_trades"
+    return _group_quantity_path(snaps, _ordered(txs))[1]
+
+
+def _group_quantity_path(
+    snaps: list[HoldingSnapshot],
+    txs: list[Transaction],
+    incoming: Sequence["TransferLink"] = (),
+) -> tuple[QuantityPath | None, str]:
+    lots: dict[int, list[HoldingSnapshot]] = {}
+    for s in snaps:
+        lots.setdefault(s.lot_seq, []).append(s)
+    starts = {min(s.as_of_date for s in members) for members in lots.values()}
+    if len(starts) != 1:
+        return (None, "lots_differ")
+    first = starts.pop()
+    if incoming:
+        if not any(t.trade_date < first for t in txs):
+            held = sum(
+                (min(members, key=lambda s: s.as_of_date).quantity for members in lots.values()),
+                ZERO,
+            )
+            return _linked_path(held, first, incoming)
+        # 自前の取引履歴がある移管先。移管が届いた入庫は呼び出し側で外してあるので、
+        # 移管の日に入庫が残っていない移管だけを仮の入庫として足す
+        extra = [
+            _virtual_transfer(link, TxType.TRANSFER_IN) for link in incoming
+            if link.date < first and not _has_transfer(txs, link, TxType.TRANSFER_IN)
+        ]
+        if extra:
+            txs = _ordered([*txs, *extra])
+    if not any(t.trade_date < first for t in txs):
+        return (None, "no_earlier_trades")
+
+    # 錨は「その日に約定の無い」最初のスナップショット日。取込の基準日に約定が
+    # あると、それがスナップショットに入っているか（夕方の取込）いないか（朝の
+    # 自動取込）が判らない。約定の無い日の数量ならどちらでも同じになる。
+    # そういう日が無ければ突合（reconcile_group）と同じく基準日の約定を含める
+    trade_days = {t.trade_date for t in txs}
+    anchor = next(
+        (d for d in sorted({s.as_of_date for s in snaps}) if d not in trade_days), first
+    )
+    held = ZERO
+    for members in lots.values():
+        upto = [s for s in members if s.as_of_date <= anchor]
+        held += max(upto, key=lambda s: s.as_of_date).quantity
+
+    by_day: dict[date, list[Transaction]] = {}
+    for t in txs:
+        if t.trade_date <= anchor:
+            by_day.setdefault(t.trade_date, []).append(t)
+    q = held
+    changes: list[tuple[date, Decimal]] = []
+    for day in sorted(by_day, reverse=True):
+        if day < first:
+            changes.append((day, q))
+        for t in reversed(by_day[day]):
+            mult, delta = _quantity_step(t)
+            q = (q - delta) / mult
+        if q < -QTY_EPSILON:
+            return (None, "inconsistent")
+        if abs(q) <= QTY_EPSILON:
+            q = ZERO
+    changes.reverse()
+    return (QuantityPath(before=first, changes=tuple(changes), opening=q), "traced")

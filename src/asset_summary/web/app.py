@@ -24,6 +24,7 @@ import logging
 import os
 import sqlite3
 import threading
+import uuid
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
@@ -43,9 +44,12 @@ from ..core.models import (
     PriceSourceStatus,
     PriceSourceType,
     Security,
+    Transaction,
+    TxType,
     Unit,
 )
 from ..core import (
+    cost_basis,
     crypto_summary_client,
     fund_autolink,
     portfolio,
@@ -53,6 +57,7 @@ from ..core import (
     re_index,
     tag_rules,
     tagging,
+    transfers,
 )
 from ..core.providers import re_index as re_index_provider
 from ..core.crypto_summary_client import (
@@ -316,10 +321,71 @@ def _derive_pension_units_now(
         return []
 
 
+def _to_dec_or_zero(value: Any) -> Decimal:
+    try:
+        return Decimal(str(value)) if value not in (None, "") else ZERO
+    except (ArithmeticError, ValueError):
+        return ZERO
+
+
 def _acct_display(acct: Any) -> str:
     if acct is None:
         return ""
     return acct.display_name or acct.name
+
+
+def _ser_transfer_link(
+    link: Any, accounts: dict[int, Any], secs: dict[int, Any]
+) -> dict[str, Any]:
+    sec = secs.get(link.security_id)
+    return {
+        "security_id": link.security_id,
+        "security": sec.name if sec else "",
+        "from_account_id": link.from_account_id,
+        "from_account": _acct_display(accounts.get(link.from_account_id)),
+        "to_account_id": link.to_account_id,
+        "to_account": _acct_display(accounts.get(link.to_account_id)),
+        "date": link.date.isoformat(),
+        "quantity": _s(link.quantity),
+        "origin": link.origin,          # auto | manual
+        "source": link.source,          # ledger | snapshot | manual
+        "cost_match": link.cost_match,
+        "manual_id": link.manual_id,
+    }
+
+
+def _ser_transfer_out(
+    out: Any, accounts: dict[int, Any], secs: dict[int, Any]
+) -> dict[str, Any]:
+    sec = secs.get(out.security_id)
+    return {
+        "security_id": out.security_id,
+        "security": sec.name if sec else "",
+        "from_account_id": out.account_id,
+        "from_account": _acct_display(accounts.get(out.account_id)),
+        "date": out.date.isoformat(),
+        "quantity": _s(out.quantity),
+        "source": out.source,           # ledger（出庫）| snapshot（保有が 0 に）
+        "carried_cost": _s(out.carried_cost),
+        "closed": out.closed,
+    }
+
+
+def _ser_transfer_candidate(c: Any, accounts: dict[int, Any]) -> dict[str, Any]:
+    a = c.arrival
+    return {
+        "account_id": a.account_id,
+        "account": _acct_display(accounts.get(a.account_id)),
+        "first_date": a.date.isoformat(),
+        "quantity": _s(a.quantity),
+        "avg_cost": _s(a.avg_cost),
+        "kind": a.kind,                 # snapshot | transfer_in | buy | other
+        "quantity_match": c.quantity_match,
+        "cost_match": c.cost_match,
+        "early": c.early,
+        # 移管先が移管の入庫を元の取得日の日付で記録している（楽天証券など）
+        "backdated": a.backdated,
+    }
 
 
 def _ser_account_ref(a: dict[str, Any]) -> dict[str, Any]:
@@ -367,6 +433,90 @@ def _mf_acquired_on(lot: HoldingSnapshot) -> str | None:
     return parsed.isoformat() if parsed else None
 
 
+def _price_hint(value: Decimal | None) -> str | None:
+    """取引の登録に入れておく単価（小数 4 桁まで。末尾の 0 は落とす）。"""
+    if value is None or value <= 0:
+        return None
+    text = format(value.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP), "f")
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+# 売買という形を取らない資産（残高・記載評価額で持つ）。取引の登録を案内しない
+_NO_TRADE_CLASSES = {AssetClass.CASH, AssetClass.POINT, AssetClass.PENSION, AssetClass.REAL_ESTATE}
+
+
+def _carried_back(
+    sec: Any,
+    snaps: list[HoldingSnapshot],
+    txs: list[Any],
+    paths: dict[tuple[int, int], Any],
+    skip: set[tuple[int, int]],
+    basis_rows: list[dict[str, Any]],
+    accounts: dict[int, Any],
+) -> list[dict[str, Any]]:
+    """1銘柄の保有数の推移で、記録ではなく遡って描いている数量（破線）を口座ごとに。
+
+    その保有を買った取引を登録すれば、買った日から描ける。銘柄詳細の注記から
+    取引タブをこの値（数量・単価・約定日の見当）を入れた状態で開くためのもの。
+    - 取引履歴でさかのぼれる口座×銘柄は、取引履歴より前から持っていた分（期首）。
+      取引履歴の最初の日より前の買付になる。単価は取得原価の「取得日不明」分の単価
+    - 最初の記録より前の取引が無い口座×銘柄は、最初の記録の数量をそのまま遡っている。
+      単価はその記録の平均取得単価
+    約定日は、取込（MF）の取得日がその日より前なら入れる。取引を足しても遡りが
+    消えない口座×銘柄（ロットごとに記録の始まる日が違う・取引履歴が記録と合わない）と、
+    移管先（残りは transfer_remainders で別に断る）は出さない。
+    """
+    if sec is None or sec.asset_class in _NO_TRADE_CLASSES:
+        return []
+    by_group: dict[tuple[int, int], list[HoldingSnapshot]] = {}
+    for s in snaps:
+        by_group.setdefault((s.account_id, s.security_id), []).append(s)
+    residual_cost = {b["account_id"]: b.get("residual_avg_cost") for b in basis_rows}
+    out: list[dict[str, Any]] = []
+    for key in sorted(set(by_group) | set(paths)):
+        if key in skip:
+            continue
+        group = by_group.get(key, [])
+        first = min((s.as_of_date for s in group), default=None)
+        firsts = [s for s in group if s.as_of_date == first]
+        path = paths.get(key)
+        if path is not None:
+            if path.opening <= ZERO:
+                continue
+            quantity = path.opening
+            until = path.changes[0][0] if path.changes else path.before
+            price = _to_dec_or_zero(residual_cost.get(key[0])) or None
+        else:
+            status = cost_basis.quantity_path_status(txs, snaps, key[0], key[1])
+            if status not in ("no_trades", "no_earlier_trades"):
+                continue
+            starts: dict[int, date] = {}
+            for s in group:
+                starts[s.lot_seq] = min(starts.get(s.lot_seq, s.as_of_date), s.as_of_date)
+            if len(set(starts.values())) != 1:
+                continue        # ロットごとに記録の始まる日が違う（取引を足しても遡る）
+            quantity = sum((s.quantity for s in firsts), ZERO)
+            if quantity <= ZERO:
+                continue
+            until = first
+            price = None
+            if all(s.avg_cost is not None for s in firsts):
+                price = sum((s.quantity * s.avg_cost for s in firsts), ZERO) / quantity
+        acquired = {_mf_acquired_on(s) for s in firsts}
+        acquired_on = acquired.pop() if len(acquired) == 1 else None
+        if acquired_on is not None and acquired_on >= until.isoformat():
+            acquired_on = None
+        out.append({
+            "account_id": key[0],
+            "account": _acct_display(accounts.get(key[0])),
+            "quantity": _s(quantity),
+            "until": until.isoformat(),
+            "unit_price": _price_hint(price),
+            "acquired_on": acquired_on,
+        })
+    return out
+
+
 def _ser_transaction(tx: Any, accounts: dict[int, Any]) -> dict[str, Any]:
     account = accounts.get(tx.account_id)
     return {
@@ -387,6 +537,7 @@ def _ser_transaction(tx: Any, accounts: dict[int, Any]) -> dict[str, Any]:
         "currency": tx.currency,
         "lot_label": tx.lot_label,
         "note": tx.note,
+        "origin": tx.origin,
         "batch_id": tx.batch_id,
     }
 
@@ -767,10 +918,32 @@ def _parse_scope(scope: str | None) -> tuple[str, str] | None:
     raise HTTPException(status_code=400, detail=f"不正な scope です: {scope}")
 
 
-def _range_start(range_key: str, snapshots: list[HoldingSnapshot], end: date) -> date:
+def _ser_history_point(p: dict[str, Any]) -> dict[str, Any]:
+    """推移の1点。保有数は1銘柄のスコープの点だけが持つ（daily_series 参照）。"""
+    out = {"t": p["t"], "value": _s(p["value"]), "cost": _s(p["cost"])}
+    if "quantity" in p:
+        out["quantity"] = _s(p["quantity"])
+        out["backfilled"] = bool(p["backfilled"])
+    return out
+
+
+def _range_start(
+    range_key: str,
+    snapshots: list[HoldingSnapshot],
+    end: date,
+    first_trade: date | None = None,
+) -> date:
+    """表示範囲の開始日。ALL は5年前と最古の記録（取引履歴を渡せば最初の約定）の早いほう。
+
+    1銘柄のグラフには、その銘柄のスナップショットだけを渡すこと。全資産のものを
+    渡すと、何年も前に登録した別の資産（不動産など）の記録日まで広がり、その銘柄が
+    存在しない期間が延々と続く。
+    """
     if range_key == "all":
         five_years_ago = end - timedelta(days=365 * 5)
         oldest = min((s.as_of_date for s in snapshots), default=five_years_ago)
+        if first_trade is not None:
+            oldest = min(oldest, first_trade)
         return min(oldest, five_years_ago)
     days = _RANGE_DAYS.get(range_key, 90)
     return end - timedelta(days=days)
@@ -1612,6 +1785,23 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
 
         snapshots = store.all_snapshots()
         secs = store.securities_by_id()
+        # 価格系列を用意する銘柄。1銘柄の推移（銘柄詳細の評価額・保有数）なら
+        # その銘柄のぶんだけで足りる — 全銘柄を回すと、ALL の範囲では他の銘柄の
+        # 履歴取得まで走ってしまう
+        priced_secs = secs
+        # 1銘柄の推移だけは、最初の取込より前を取引履歴でさかのぼる。
+        # 総資産・クラス・口座では使わない — 現金の出入りは台帳に無いので、
+        # 株だけ過去へ戻すと「現金で買った」ことが資産の増加に見えてしまう
+        scope_txs: list[Any] = []
+        range_snapshots = snapshots
+        if scope_t is not None and scope_t[0] == "security":
+            sec_id = _to_int(scope_t[1], "security")
+            if sec_id not in secs:
+                raise HTTPException(status_code=404, detail="銘柄が見つかりません")
+            scope_t = ("security", str(sec_id))
+            priced_secs = {sec_id: secs[sec_id]}
+            scope_txs = store.list_transactions(security_id=sec_id)
+            range_snapshots = [s for s in snapshots if s.security_id == sec_id]
         # タグ・Myポートフォリオは「銘柄の集合」ではなく「銘柄ごとの計上率」で
         # 決まるので、daily_series には scope ではなく重みを渡す
         ratio_by_security: dict[Any, Decimal] | None = None
@@ -1630,11 +1820,14 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
             series_scope = None
         accounts = {a.id: a for a in store.list_accounts()}
         end = date.today()
-        start = _range_start(range_key, snapshots, end)
+        start = _range_start(
+            range_key, range_snapshots, end,
+            first_trade=scope_txs[0].trade_date if scope_txs else None,
+        )
 
         linked = [
             s
-            for s in secs.values()
+            for s in priced_secs.values()
             if s.price_source_status == PriceSourceStatus.LINKED
         ]
         if linked:
@@ -1643,7 +1836,7 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
             except Exception as e:  # noqa: BLE001
                 warnings.append(f"価格取得エラー: {e}")
         try:
-            ensure_re_index_history(store, secs.values(), end, warn=warnings.append)
+            ensure_re_index_history(store, priced_secs.values(), end, warn=warnings.append)
         except Exception as e:  # noqa: BLE001
             warnings.append(f"価格取得エラー: {e}")
         ccys = {s.currency for s in secs.values() if s.currency != "JPY"}
@@ -1657,7 +1850,7 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
 
         # start は制限しない（初回登録日以前への遡及バックフィルに過去価格を使う）
         price_series: dict[int, tuple[dict[str, Decimal], str]] = {}
-        for sid, sec in secs.items():
+        for sid, sec in priced_secs.items():
             price_series[sid] = store.price_series_for_security(
                 sec, start=None, end=end.isoformat()
             )
@@ -1672,6 +1865,47 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
                 )
                 jpy_disp_series = None
 
+        # 1銘柄の推移は、口座間の移管（証券会社を移した分）もつなぐ。移管元の
+        # 取引履歴と、移管先の最初の記録より前がこれで1本の線になる
+        quantity_paths = None
+        transfer_links: list[Any] = []
+        transfer_remainders: list[dict[str, Any]] = []
+        carried_back: list[dict[str, Any]] = []
+        if scope_t is not None and scope_t[0] == "security":
+            sid = int(scope_t[1])
+            sec_snaps = [s for s in snapshots if s.security_id == sid]
+            moves = transfers.resolve(
+                scope_txs, sec_snaps, store.list_transfer_links(security_id=sid)
+            )
+            transfer_links = moves.links
+            quantity_paths = cost_basis.quantity_paths(
+                scope_txs, sec_snaps, transfer_links
+            ) or None
+            # 移管先の最初の記録が、移ってきた数量より多い。残りはいつからあったか
+            # 判らないので、移管より前から持っていた分として遡って描く（破線）。
+            # 移管の後に買い足した分なら、その買付を取引に登録すれば直ると知らせる
+            for key in sorted({(link.to_account_id, link.security_id) for link in transfer_links}):
+                path = (quantity_paths or {}).get(key)
+                if path is None or path.before == date.max or path.opening <= ZERO:
+                    continue
+                transfer_remainders.append({
+                    "account_id": key[0],
+                    "account": _acct_display(accounts.get(key[0])),
+                    "quantity": _s(path.opening),
+                    "first_date": path.before.isoformat(),
+                })
+            # 遡って描いている数量（破線）。買付を取引に登録すれば買った日から描ける。
+            # 移管先（残りは上で断る）と、決まっていない移管の候補の口座（その記録は
+            # 移管が届いたものかもしれない。先に移管を決める）には案内しない
+            not_bought = {(link.to_account_id, link.security_id) for link in transfer_links}
+            not_bought |= {
+                (c.arrival.account_id, sid) for _out, cands in moves.unresolved for c in cands
+            }
+            carried_back = _carried_back(
+                secs.get(sid), sec_snaps, scope_txs, quantity_paths or {}, not_bought,
+                store.list_cost_basis(security_id=sid), accounts,
+            )
+
         points = daily_series(
             snapshots,
             secs,
@@ -1684,6 +1918,7 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
             jpy_per_display_series=jpy_disp_series,
             scope=series_scope,
             ratio_by_security=ratio_by_security,
+            quantity_paths=quantity_paths,
         )
 
         # 価格が無い保有を2つに分ける。is_partial は「取得中＝待てば出る」という
@@ -1766,10 +2001,12 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
             "currency": cur,
             "range": range_norm,
             "scope": scope,
-            "points": [
-                {"t": p["t"], "value": _s(p["value"]), "cost": _s(p["cost"])}
-                for p in points
+            "points": [_ser_history_point(p) for p in points],
+            "transfers": [
+                _ser_transfer_link(link, accounts, secs) for link in transfer_links
             ],
+            "transfer_remainders": transfer_remainders,
+            "carried_back": carried_back,
             "unpriced": sorted(unpriced_names),
             "needs_valuation": sorted(needs_valuation),
             "is_partial": bool(unpriced_names) or cs_is_partial,
@@ -1840,14 +2077,44 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
                 }
             )
 
-        cost_basis = [
-            {**b, "account": _acct_display(accounts.get(b["account_id"]))}
-            for b in basis_by_account.values()
-        ]
+        # 移管で出ていった口座（今は持っていない）には移管先を添える。取得原価の
+        # カードで、その口座の履歴が「いまの保有を説明している」と読めないように
+        moves = transfers.resolve(
+            store.list_transactions(security_id=security_id),
+            [s for s in store.all_snapshots() if s.security_id == security_id],
+            store.list_transfer_links(security_id=security_id),
+        )
+        moved_out: dict[int, Any] = {}
+        for link in moves.links:
+            if link.from_account_id not in moved_out or link.date > moved_out[link.from_account_id].date:
+                moved_out[link.from_account_id] = link
+        cost_basis = []
+        for b in basis_by_account.values():
+            row = {**b, "account": _acct_display(accounts.get(b["account_id"]))}
+            link = moved_out.get(b["account_id"])
+            held = _to_dec_or_zero(b.get("covered_quantity")) + _to_dec_or_zero(
+                b.get("residual_quantity")
+            )
+            if link is not None and held == ZERO:
+                row["transferred_to"] = _acct_display(accounts.get(link.to_account_id))
+                row["transferred_on"] = link.date.isoformat()
+                # 「取込前に売却済みとみなしました」は移管には当たらない
+                row["warnings"] = [
+                    w for w in (row.get("warnings") or [])
+                    if not (isinstance(w, dict) and w.get("code") == "CLOSED_POSITION")
+                ]
+            cost_basis.append(row)
         tx_count = store.count_transactions(security_id=security_id)
 
         end = date.today()
-        start = _range_start(range_key, store.all_snapshots(), end)
+        # ALL はこの銘柄の最初の記録・約定まで（評価額・保有数の推移と同じ範囲にそろえる）
+        first_tx = store.list_transactions(security_id=security_id, limit=1)
+        start = _range_start(
+            range_key,
+            [s for s in store.all_snapshots() if s.security_id == security_id],
+            end,
+            first_trade=first_tx[0].trade_date if first_tx else None,
+        )
         if sec.price_source_status == PriceSourceStatus.LINKED:
             try:
                 ensure_price_history(store, [sec], start, end, warn=warnings.append)
@@ -1887,6 +2154,19 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
             "cost_basis": cost_basis,
             "lot_events": cost_basis_events(store, security_id) if tx_count else [],
             "transaction_count": tx_count,
+            # 結び付いた移管（証券会社を移した履歴）。口座別内訳の下に小さく添える
+            "transfers": [
+                _ser_transfer_link(link, accounts, {security_id: sec}) for link in moves.links
+            ],
+            # 自動では移管先を決められなかった移管元。銘柄詳細からも選べるように、
+            # 移管タブ（/api/transfers の unresolved）と同じ形で返す
+            "transfer_unresolved": [
+                {
+                    **_ser_transfer_out(out, accounts, {security_id: sec}),
+                    "candidates": [_ser_transfer_candidate(c, accounts) for c in cands],
+                }
+                for out, cands in moves.unresolved
+            ],
             "price_history": price_history,
             "warnings": warnings,
             "generated_at": _utcnow_iso(),
@@ -2064,12 +2344,15 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
         security_id: int,
         limit: int = Query(200, ge=1, le=500),
         offset: int = Query(0, ge=0),
+        order: str = Query("asc", pattern="^(asc|desc)$"),
     ) -> dict[str, Any]:
+        """銘柄の取引履歴。order=desc で新しい順（ページ送りもその順で）。"""
         if store.get_security(security_id) is None:
             raise HTTPException(status_code=404, detail="銘柄が見つかりません")
         accounts = {a.id: a for a in store.list_accounts()}
         txs = store.list_transactions(
-            security_id=security_id, limit=limit, offset=offset
+            security_id=security_id, limit=limit, offset=offset,
+            descending=order == "desc",
         )
         return {
             "transactions": [_ser_transaction(t, accounts) for t in txs],
@@ -2077,6 +2360,241 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
             "warnings": [],
             "generated_at": _utcnow_iso(),
         }
+
+    # ------------------------------------------------------------------
+    # 手動の取引（取引履歴をダウンロードできない証券会社のぶん）
+    #
+    # 取込と同じ台帳に origin='manual' で入れる。どのバッチにも属さないので
+    # 取込の巻き戻しでは消えず、ここから1件ずつ消す。
+    # ------------------------------------------------------------------
+
+    def _price_on(
+        sec: Security, day: date, warnings: list[str]
+    ) -> tuple[str, Decimal] | None:
+        """約定日（無ければ7日前まで）の単価。見つからなければ None。"""
+        if sec.price_source_status == PriceSourceStatus.LINKED:
+            try:
+                ensure_price_history(
+                    store, [sec], day - timedelta(days=10), day, warn=warnings.append
+                )
+            except Exception as e:  # noqa: BLE001
+                warnings.append(f"価格取得エラー: {e}")
+        series, ccy = store.price_series_for_security(
+            sec, start=(day - timedelta(days=7)).isoformat(), end=day.isoformat()
+        )
+        # 取込時の記載値（円建て）しか無い外貨建て銘柄などは、建値通貨の
+        # 単価として使えない
+        if not series or (ccy or sec.currency) != sec.currency:
+            return None
+        found = max(series)
+        return (found, series[found])
+
+    @app.get("/api/transactions/manual")
+    def api_manual_transactions() -> dict[str, Any]:
+        accounts = {a.id: a for a in store.list_accounts()}
+        secs = store.securities_by_id()
+        return {
+            "transactions": [
+                {
+                    **_ser_transaction(t, accounts),
+                    "security": secs[t.security_id].name if t.security_id in secs else "",
+                }
+                for t in store.list_transactions(origin="manual")
+            ],
+            "warnings": [],
+            "generated_at": _utcnow_iso(),
+        }
+
+    @app.post("/api/transactions")
+    def api_manual_transaction_create(
+        payload: dict[str, Any] = Body(...)
+    ) -> dict[str, Any]:
+        account = store.get_account(
+            _to_int(payload.get("account_id"), "account_id", minimum=1)
+        )
+        if account is None:
+            raise HTTPException(status_code=404, detail="口座が見つかりません")
+        sec = store.get_security(
+            _to_int(payload.get("security_id"), "security_id", minimum=1)
+        )
+        if sec is None:
+            raise HTTPException(status_code=404, detail="銘柄が見つかりません")
+        tx_type = str(payload.get("tx_type") or "")
+        if tx_type not in (TxType.BUY.value, TxType.SELL.value):
+            raise HTTPException(
+                status_code=400, detail="tx_type は buy か sell で指定してください"
+            )
+        trade_date = _to_date(payload.get("trade_date"), "trade_date")
+        if trade_date > date.today():
+            raise HTTPException(status_code=400, detail="未来の約定日は登録できません")
+        quantity = _to_decimal(payload.get("quantity"), "quantity")
+        if quantity <= 0:
+            raise HTTPException(status_code=400, detail="数量は正の数で指定してください")
+        unit_price = _to_decimal_opt(payload.get("unit_price"), "unit_price")
+        if unit_price is not None and unit_price <= 0:
+            raise HTTPException(status_code=400, detail="単価は正の数で指定してください")
+        fee = _to_decimal_opt(payload.get("fee"), "fee") or ZERO
+        if fee < 0:
+            raise HTTPException(status_code=400, detail="手数料は 0 以上で指定してください")
+
+        warnings: list[str] = []
+        price_from = None
+        if unit_price is None:
+            # 単価が無いまま入れると取得費 0 円の買付になり、それで保有が説明
+            # できてしまうと評価損益が「全額が利益」に化ける。約定日の価格
+            # （投信なら基準価額）で埋め、無ければ入力してもらう
+            found = _price_on(sec, trade_date, warnings)
+            if found is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="約定日の価格が見つからないため、単価を入力してください",
+                )
+            price_from, unit_price = found
+
+        gross = quantity * unit_price / Decimal(sec.price_unit_divisor or 1)
+        is_buy = tx_type == TxType.BUY.value
+        tx_id = store.add_manual_transaction(
+            Transaction(
+                dedup_key=f"manual:{uuid.uuid4().hex}",
+                account_id=account.id,
+                security_id=sec.id,
+                trade_date=trade_date,
+                tx_type=TxType(tx_type),
+                quantity=quantity if is_buy else -quantity,
+                unit_price=unit_price,
+                gross_amount=gross,
+                fee=fee,
+                net_amount=-(gross + fee) if is_buy else gross - fee,
+                currency=sec.currency,
+                origin="manual",
+                note=f"単価は {price_from} の価格から補完" if price_from else None,
+            )
+        )
+        recompute_cost_basis(store)
+
+        # 入れた取引が推移グラフに届いたかを返す（届かないならその理由）
+        snaps = [s for s in store.all_snapshots() if s.security_id == sec.id]
+        group = [s for s in snaps if s.account_id == account.id]
+        accounts = {a.id: a for a in store.list_accounts()}
+        return {
+            "ok": True,
+            "transaction": _ser_transaction(store.get_transaction(tx_id), accounts),
+            "price_filled_from": price_from,
+            "chart_status": cost_basis.quantity_path_status(
+                store.list_transactions(security_id=sec.id), snaps, account.id, sec.id
+            ),
+            "first_snapshot": min(s.as_of_date for s in group).isoformat() if group else None,
+            "warnings": warnings,
+            "generated_at": _utcnow_iso(),
+        }
+
+    @app.delete("/api/transactions/{tx_id}")
+    def api_manual_transaction_delete(tx_id: int) -> dict[str, Any]:
+        tx = store.get_transaction(tx_id)
+        if tx is None:
+            raise HTTPException(status_code=404, detail="取引が見つかりません")
+        if tx.origin != "manual":
+            raise HTTPException(
+                status_code=409,
+                detail="取り込んだ取引は、取込履歴からファイルごと巻き戻してください",
+            )
+        store.delete_transaction(tx_id)
+        recompute_cost_basis(store)
+        return {"ok": True}
+
+    # ------------------------------------------------------------------
+    # 口座間の移管（証券会社を移した銘柄）
+    # ------------------------------------------------------------------
+
+    @app.get("/api/transfers")
+    def api_transfers() -> dict[str, Any]:
+        """結び付けた移管と、自動では決められなかった移管の候補。"""
+        accounts = {a.id: a for a in store.list_accounts()}
+        secs = store.securities_by_id()
+        res = transfers.resolve(
+            store.list_transactions(), store.all_snapshots(), store.list_transfer_links()
+        )
+        dismissed = []
+        for out, decision in res.dismissed:
+            row = (
+                _ser_transfer_out(out, accounts, secs) if out is not None else {
+                    "security_id": decision.security_id,
+                    "security": secs[decision.security_id].name
+                    if decision.security_id in secs else "",
+                    "from_account_id": decision.from_account_id,
+                    "from_account": _acct_display(accounts.get(decision.from_account_id)),
+                    "date": decision.date.isoformat(),
+                    "quantity": _s(decision.quantity),
+                    "source": None,
+                }
+            )
+            dismissed.append({
+                **row, "manual_id": decision.id, "found": out is not None,
+                "candidates": [
+                    _ser_transfer_candidate(c, accounts)
+                    for c in res.candidates.get(decision.key, [])
+                ],
+            })
+        return {
+            "links": [
+                {
+                    **_ser_transfer_link(link, accounts, secs),
+                    "candidates": [
+                        _ser_transfer_candidate(c, accounts)
+                        for c in res.candidates.get(
+                            (link.security_id, link.from_account_id, link.date), []
+                        )
+                    ],
+                }
+                for link in res.links
+            ],
+            "unresolved": [
+                {
+                    **_ser_transfer_out(out, accounts, secs),
+                    "candidates": [_ser_transfer_candidate(c, accounts) for c in cands],
+                }
+                for out, cands in res.unresolved
+            ],
+            "dismissed": dismissed,
+            "generated_at": _utcnow_iso(),
+        }
+
+    @app.post("/api/transfers")
+    def api_transfer_set(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        """移管元の出来事ひとつについて、移管先を決める（to_account_id=null は「移管ではない」）。"""
+        sec_id = _to_int(payload.get("security_id"), "security_id", minimum=1)
+        if store.get_security(sec_id) is None:
+            raise HTTPException(status_code=404, detail="銘柄が見つかりません")
+        from_id = _to_int(payload.get("from_account_id"), "from_account_id", minimum=1)
+        if store.get_account(from_id) is None:
+            raise HTTPException(status_code=404, detail="移管元の口座が見つかりません")
+        to_raw = payload.get("to_account_id")
+        to_id = None
+        if to_raw is not None:
+            to_id = _to_int(to_raw, "to_account_id", minimum=1)
+            if store.get_account(to_id) is None:
+                raise HTTPException(status_code=404, detail="移管先の口座が見つかりません")
+            if to_id == from_id:
+                raise HTTPException(status_code=400, detail="移管元と移管先が同じ口座です")
+        transfer_date = _to_date(payload.get("date"), "date")
+        quantity = _to_decimal(payload.get("quantity"), "quantity")
+        if quantity <= 0:
+            raise HTTPException(status_code=400, detail="数量は正の数で指定してください")
+        link_id = store.set_transfer_link(
+            security_id=sec_id,
+            from_account_id=from_id,
+            transfer_date=transfer_date,
+            quantity=quantity,
+            to_account_id=to_id,
+        )
+        return {"ok": True, "id": link_id}
+
+    @app.delete("/api/transfers/{link_id}")
+    def api_transfer_delete(link_id: int) -> dict[str, Any]:
+        """利用者の判断を取り消す（その出来事は自動の判定に戻る）。"""
+        if not store.delete_transfer_link(link_id):
+            raise HTTPException(status_code=404, detail="移管の判断が見つかりません")
+        return {"ok": True}
 
     @app.get("/api/cost-basis")
     def api_cost_basis(
@@ -2198,9 +2716,23 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
         sym = sym.strip().upper()
         acc = fetch_cs_asset_accounts(sym, cur, sub, warn=warnings.append)
         range_norm = range_key if range_key in (*_RANGE_DAYS, "all") else "90d"
-        hist = fetch_cs_history(
-            cur, range_norm, f"asset:{sym}", sub, warn=warnings.append
-        )
+        scope = f"asset:{sym}"
+        hist = fetch_cs_history(cur, range_norm, scope, sub, warn=warnings.append)
+        # 保有数は metric=balance、価格は metric=price の系列から取る。評価額が
+        # 取れなかったとき（CS に届かない・認証の失敗など）はどちらも取れないので、
+        # 重ねて問い合わせない（タイムアウトを何度も待たない）。metric を知らない
+        # 古い CS はどの metric にも評価額の応答を返す（CS と AS は別々に更新される）。
+        # そのとき保有数は評価額の点に付いた balance に戻り、価格は出せないので、
+        # 保有数の系列が返ってこなければ価格は聞かない
+        bal = price = None
+        if hist is not None:
+            bal = fetch_cs_history(
+                cur, range_norm, scope, sub, warn=warnings.append, metric="balance"
+            )
+            if crypto_summary_client.is_balance_history(bal):
+                price = fetch_cs_history(
+                    cur, range_norm, scope, sub, warn=warnings.append, metric="price"
+                )
         # 前日比は /api/summary の前日値から作る（同じコインの行が保有テーブルにも
         # 出るので、そちらと同じ数字にする必要がある）。summary は TTL キャッシュ
         # 済みで追加の往復にならない。前日値を返さない旧 CS 相手のときだけ、
@@ -2226,7 +2758,15 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
             "day_change_pct": _pct(day_change_pct),
             "accounts": (acc or {}).get("accounts") or [],
             "history": {
-                "points": (hist or {}).get("points") or [],
+                # 評価額・保有数・価格を載せ、画面が切り替えて描く（切替では取り直さない）。
+                # 点の並ぶ日がそれぞれ違う（保有数は価格の無い日にも、価格は持つ前の日にも
+                # 点がある）ので、日付で1本にまとめず別々の配列で返す。まとめると値の無い
+                # 日が null になり、線が 0 に落ちる
+                "points": crypto_summary_client.cs_value_points(
+                    (hist or {}).get("points")
+                ),
+                "quantity_points": crypto_summary_client.cs_quantity_points(bal, hist),
+                "price_points": crypto_summary_client.cs_price_points(price),
                 "is_partial": bool((hist or {}).get("is_partial")),
             },
             "range": range_norm,

@@ -183,6 +183,25 @@ def test_transactions_endpoint(client):
     assert "generated_at" in body
 
 
+def test_transactions_can_be_listed_newest_first(client):
+    """order=desc は約定日の新しい順。ページ送り（offset）もその順で進む。"""
+    api, _store, security_id = client
+    preview = api.post("/api/import/table", json={
+        "filename": "t.csv", "content_b64": _b64(CSV), "account_name": BROKER,
+    }).json()
+    api.post(f"/api/import/table/{preview['batch_id']}/commit", json={"account_name": BROKER})
+
+    def dates(**params):
+        body = api.get(f"/api/securities/{security_id}/transactions", params=params).json()
+        return [t["trade_date"] for t in body["transactions"]]
+
+    assert dates() == ["2026-01-05", "2026-02-10", "2026-03-03"]
+    assert dates(order="desc") == ["2026-03-03", "2026-02-10", "2026-01-05"]
+    assert dates(order="desc", limit=2, offset=2) == ["2026-01-05"]
+    bad = api.get(f"/api/securities/{security_id}/transactions", params={"order": "up"})
+    assert bad.status_code == 422
+
+
 def test_transactions_for_an_unknown_security_is_404(client):
     api, _store, _sid = client
     assert api.get("/api/securities/999/transactions").status_code == 404

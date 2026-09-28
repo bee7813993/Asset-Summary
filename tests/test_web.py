@@ -16,7 +16,7 @@ os.environ.setdefault(
     "AS_DB_PATH", os.path.join(tempfile.mkdtemp(prefix="asset-summary-test-"), "t.db")
 )
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
@@ -26,9 +26,11 @@ import asset_summary.web.app as web_app
 from asset_summary.core.models import (
     AssetClass,
     HoldingSnapshot,
+    ImportBatch,
     PriceSourceStatus,
     PriceSourceType,
     Security,
+    Transaction,
     Unit,
 )
 from asset_summary.importers.service import DuplicateImportError
@@ -431,6 +433,204 @@ def test_portfolio_history_scopes(client, store):
     assert client.get(
         "/api/portfolio-history", params={"scope": "bogus"}
     ).status_code == 400
+
+
+def test_portfolio_history_security_scope_carries_quantity(client, store):
+    """1銘柄の推移は保有数も返す（銘柄詳細で評価額⇔保有数を切り替える材料）。"""
+    acct, stock_id = _seed_stock(store)
+    today = date.today()
+    # 3日前に 100株 → 150株 へ買い増し（_seed_stock の 8/1 の100株に続く記録）
+    store.upsert_snapshot(
+        HoldingSnapshot(
+            account_id=acct.id,
+            security_id=stock_id,
+            as_of_date=today - timedelta(days=3),
+            quantity=D("150"),
+            avg_cost=D("1000"),
+        )
+    )
+    client.post(
+        f"/api/securities/{stock_id}/manual-price",
+        json={"date": "2026-08-01", "value": "1000"},
+    )
+    data = client.get(
+        "/api/portfolio-history", params={"range": "7d", "scope": f"security:{stock_id}"}
+    ).json()
+    pts = {p["t"]: p for p in data["points"]}
+    before = (today - timedelta(days=4)).isoformat()
+    after = (today - timedelta(days=3)).isoformat()
+    assert D(pts[before]["quantity"]) == D("100")
+    assert D(pts[after]["quantity"]) == D("150")
+    # 8/1 から記録があるので、この範囲に遡及した点は無い
+    assert not any(p["backfilled"] for p in data["points"])
+    for p in data["points"]:
+        assert D(p["value"]) == D(p["quantity"]) * D("1000")
+
+    # 銘柄をまたぐスコープには保有数を載せない（足しても意味が無い）
+    total = client.get("/api/portfolio-history", params={"range": "7d"}).json()
+    assert "quantity" not in total["points"][-1]
+
+
+def test_portfolio_history_security_scope_marks_backfilled_days(client, store):
+    """初回スナップショットより前の保有数は遡及なので backfilled を立てる。"""
+    acct = store.get_or_create_account("テスト証券", kind="broker")
+    sec_id = store.create_security(
+        Security(name="新規工業", name_key="しんきこうぎょう", code="8888",
+                 asset_class=AssetClass.STOCK_JP)
+    )
+    first = date.today() - timedelta(days=2)
+    store.upsert_snapshot(
+        HoldingSnapshot(account_id=acct.id, security_id=sec_id, as_of_date=first,
+                        quantity=D("10"), avg_cost=D("500"))
+    )
+    data = client.get(
+        "/api/portfolio-history", params={"range": "7d", "scope": f"security:{sec_id}"}
+    ).json()
+    flags = {p["t"]: p["backfilled"] for p in data["points"]}
+    assert flags[(first - timedelta(days=1)).isoformat()] is True
+    assert flags[first.isoformat()] is False
+    assert all(p["quantity"] == "10" for p in data["points"])
+
+
+def test_portfolio_history_security_scope_walks_back_through_the_ledger(client, store):
+    """取引履歴のある銘柄は、最初の取込より前も実際の保有数で描く。
+
+    総資産の推移には使わない（現金の出入りが台帳に無いため）。
+    """
+    acct = store.get_or_create_account("マネー証券", kind="broker")
+    sec_id = store.create_security(
+        Security(name="長期工業", name_key="ちょうきこうぎょう", code="7777",
+                 asset_class=AssetClass.STOCK_JP,
+                 price_source_type=PriceSourceType.YAHOO, price_source_ref="7777.T",
+                 price_source_status=PriceSourceStatus.LINKED)
+    )
+    store.upsert_snapshot(
+        HoldingSnapshot(account_id=acct.id, security_id=sec_id,
+                        as_of_date=date(2026, 8, 4), quantity=D("100"), avg_cost=D("950"))
+    )
+    for day, px in (("2019-04-01", "800"), ("2023-06-01", "1000"), ("2026-08-03", "1200")):
+        store.upsert_daily_price("yahoo", "7777.T", day, D(px), "JPY")
+    store.create_batch(ImportBatch(id="tx-ledger", source_kind="broker_csv"))
+    store.insert_transactions(
+        [
+            Transaction(dedup_key="l1", account_id=acct.id, security_id=sec_id,
+                        trade_date=date(2019, 4, 1), tx_type="buy", quantity=D("60"),
+                        unit_price=D("800"), gross_amount=D("48000")),
+            Transaction(dedup_key="l2", account_id=acct.id, security_id=sec_id,
+                        trade_date=date(2023, 6, 1), tx_type="buy", quantity=D("40"),
+                        unit_price=D("1000"), gross_amount=D("40000")),
+        ],
+        batch_id="tx-ledger",
+    )
+
+    data = client.get(
+        "/api/portfolio-history", params={"range": "all", "scope": f"security:{sec_id}"}
+    ).json()
+    pts = {p["t"]: p for p in data["points"]}
+    # ALL は5年より前でも最初の約定まで届く
+    assert data["points"][0]["t"] == "2019-04-01"
+    assert pts["2019-04-01"]["quantity"] == "60"
+    assert D(pts["2019-04-01"]["value"]) == D("48000")      # 60株 × 800円
+    assert pts["2023-05-31"]["quantity"] == "60"
+    assert pts["2023-06-01"]["quantity"] == "100"
+    assert not any(p["backfilled"] for p in data["points"])
+
+    # 価格の推移も同じ範囲（表示対象を切り替えても横軸がそろう）
+    detail = client.get(f"/api/security/{sec_id}", params={"range": "all"}).json()
+    assert detail["price_history"][0]["t"] == "2019-04-01"
+
+    # 総資産は従来どおり、最初の取込の保有数（100株）で遡る。台帳なら
+    # 2021年は 60株。ALL は5年前から（そのときの株価は 2019年の 800円のまま）
+    total = client.get("/api/portfolio-history", params={"range": "all"}).json()
+    assert D(total["points"][0]["value"]) == D("100") * D("800")
+
+
+def test_security_all_range_ignores_older_records_of_other_assets(client, store):
+    """1銘柄の ALL は、その銘柄の記録・約定から決める（5年に満たなければ5年）。
+
+    何年も前に登録した別の資産（不動産など）の記録日まで広げると、その銘柄が
+    存在しない期間が延々と 0 で続く。総資産の ALL は従来どおり全資産の最古の記録から。
+    """
+    broker = store.get_or_create_account("マネー証券", kind="broker")
+    home = store.get_or_create_account("自宅", kind="other")
+    fund = store.create_security(
+        Security(name="全世界インデックス", name_key="ぜんせかいいんでっくす",
+                 asset_class=AssetClass.FUND_JP, unit=Unit.KUCHI, price_unit_divisor=10000,
+                 price_source_type=PriceSourceType.TOUSHIN, price_source_ref="JP9000:X",
+                 price_source_status=PriceSourceStatus.LINKED)
+    )
+    house = store.create_security(
+        Security(name="自宅マンション", name_key="じたくまんしょん",
+                 asset_class=AssetClass.REAL_ESTATE, unit=Unit.UNIT,
+                 price_source_status=PriceSourceStatus.MANUAL)
+    )
+    store.upsert_snapshot(
+        HoldingSnapshot(account_id=home.id, security_id=house, as_of_date=date(2013, 5, 17),
+                        quantity=D("1"), avg_cost=D("30000000"))
+    )
+    store.upsert_snapshot(
+        HoldingSnapshot(account_id=broker.id, security_id=fund, as_of_date=date(2026, 8, 4),
+                        quantity=D("100000"), avg_cost=D("20000"))
+    )
+    for day in ("2018-11-01", "2020-01-06", "2022-01-04", "2024-02-02", "2026-08-03"):
+        store.upsert_daily_price("toushin", "JP9000:X", day, D("20000"), "JPY")
+    store.create_batch(ImportBatch(id="tx-ledger", source_kind="broker_csv"))
+    store.insert_transactions(
+        [Transaction(dedup_key="b1", account_id=broker.id, security_id=fund,
+                     trade_date=date(2024, 2, 2), tx_type="buy", quantity=D("100000"),
+                     unit_price=D("20000"), gross_amount=D("200000"))],
+        batch_id="tx-ledger",
+    )
+    five_years_ago = date.today() - timedelta(days=365 * 5)
+
+    hist = client.get(
+        "/api/portfolio-history", params={"range": "all", "scope": f"security:{fund}"}
+    ).json()
+    assert hist["points"][0]["t"] == five_years_ago.isoformat()   # 2013 ではない
+    # 価格の推移も同じ範囲（それより前の価格はあっても出さない）
+    detail = client.get(f"/api/security/{fund}", params={"range": "all"}).json()
+    assert detail["price_history"][0]["t"] == "2022-01-04"
+
+    total = client.get("/api/portfolio-history", params={"range": "all"}).json()
+    assert total["points"][0]["t"] == "2013-05-17"
+
+
+def test_portfolio_history_security_scope_validates_target(client, store):
+    assert client.get(
+        "/api/portfolio-history", params={"scope": "security:abc"}
+    ).status_code == 400
+    assert client.get(
+        "/api/portfolio-history", params={"scope": "security:999999"}
+    ).status_code == 404
+
+
+def test_portfolio_history_security_scope_prepares_only_that_security(
+    client, store, monkeypatch
+):
+    """1銘柄の推移で、ほかの銘柄の価格履歴まで取りに行かない。"""
+    ids = []
+    for code in ("1111", "2222"):
+        ids.append(
+            store.create_security(
+                Security(
+                    name=f"連携{code}", name_key=f"れんけい{code}", code=code,
+                    asset_class=AssetClass.STOCK_JP,
+                    price_source_type=PriceSourceType.YAHOO,
+                    price_source_ref=f"{code}.T",
+                    price_source_status=PriceSourceStatus.LINKED,
+                )
+            )
+        )
+    seen: list[list[int]] = []
+    monkeypatch.setattr(
+        web_app, "ensure_price_history",
+        lambda store, secs, *a, **k: seen.append([s.id for s in secs]),
+    )
+    client.get("/api/portfolio-history", params={"scope": f"security:{ids[0]}"})
+    assert seen == [[ids[0]]]
+    seen.clear()
+    client.get("/api/portfolio-history")
+    assert sorted(seen[0]) == sorted(ids)
 
 
 def test_portfolio_history_unpriced_partial(client, store):

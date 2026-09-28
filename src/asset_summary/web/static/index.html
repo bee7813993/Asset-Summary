@@ -379,13 +379,20 @@
 
           <section class="card history-card">
             <div class="history-header">
-              <h2 data-i18n="label.valueHistorySection">評価額推移</h2>
-              <div class="range-tabs" id="cs-asset-range-tabs">
-                <button class="range-tab" data-range="7d">7D</button>
-                <button class="range-tab" data-range="30d">30D</button>
-                <button class="range-tab active" data-range="90d">90D</button>
-                <button class="range-tab" data-range="1y">1Y</button>
-                <button class="range-tab" data-range="all">ALL</button>
+              <h2 id="cs-asset-history-title" data-i18n="label.valueHistorySection">評価額推移</h2>
+              <div class="history-controls">
+                <div class="range-tabs metric-tabs" id="cs-asset-metric-tabs">
+                  <button class="range-tab" data-metric="price" data-i18n="chart.metricPrice">価格</button>
+                  <button class="range-tab active" data-metric="value" data-i18n="chart.metricValue">評価額</button>
+                  <button class="range-tab" data-metric="quantity" data-i18n="chart.metricQuantity">保有数</button>
+                </div>
+                <div class="range-tabs" id="cs-asset-range-tabs">
+                  <button class="range-tab" data-range="7d">7D</button>
+                  <button class="range-tab" data-range="30d">30D</button>
+                  <button class="range-tab active" data-range="90d">90D</button>
+                  <button class="range-tab" data-range="1y">1Y</button>
+                  <button class="range-tab" data-range="all">ALL</button>
+                </div>
               </div>
             </div>
             <div class="history-chart-wrap">
@@ -579,13 +586,20 @@
 
           <section class="card history-card">
             <div class="history-header">
-              <h2 data-i18n="label.priceHistorySection">価格推移</h2>
-              <div class="range-tabs" id="sec-range-tabs">
-                <button class="range-tab" data-range="7d">7D</button>
-                <button class="range-tab" data-range="30d">30D</button>
-                <button class="range-tab" data-range="90d">90D</button>
-                <button class="range-tab active" data-range="1y">1Y</button>
-                <button class="range-tab" data-range="all">ALL</button>
+              <h2 id="sec-history-title" data-i18n="label.priceHistorySection">価格推移</h2>
+              <div class="history-controls">
+                <div class="range-tabs metric-tabs" id="sec-metric-tabs">
+                  <button class="range-tab active" data-metric="price" data-i18n="chart.metricPrice">価格</button>
+                  <button class="range-tab" data-metric="value" data-i18n="chart.metricValue">評価額</button>
+                  <button class="range-tab" data-metric="quantity" data-i18n="chart.metricQuantity">保有数</button>
+                </div>
+                <div class="range-tabs" id="sec-range-tabs">
+                  <button class="range-tab" data-range="7d">7D</button>
+                  <button class="range-tab" data-range="30d">30D</button>
+                  <button class="range-tab" data-range="90d">90D</button>
+                  <button class="range-tab active" data-range="1y">1Y</button>
+                  <button class="range-tab" data-range="all">ALL</button>
+                </div>
               </div>
             </div>
             <div class="history-chart-wrap">
@@ -593,6 +607,21 @@
               <p class="history-empty hidden" data-i18n="label.noPriceData">価格データがありません</p>
             </div>
             <div id="price-history-loading" class="loading hidden" data-i18n="label.loading">読み込み中…</div>
+            <div id="sec-history-note" class="history-unpriced hidden"></div>
+          </section>
+
+          <!-- 移管先を自動では決められなかった移管元（移管タブと同じ候補から、ここでも選べる） -->
+          <section id="sec-transfer-card" class="card hidden">
+            <h2 id="sec-transfer-title" data-i18n="manage.trUnresolvedTitle">移管先を選んでください</h2>
+            <div id="sec-transfer-body">
+              <p class="card-hint" data-i18n="label.secTransferHint">この銘柄を別の証券会社へ移した記録のうち、移管先を自動では決められなかったものです。移管先を選ぶと、推移グラフが移管の前後で1本の線になります。</p>
+              <div id="sec-transfer-list" class="transfer-list"></div>
+            </div>
+            <div id="sec-transfer-result" class="settings-result hidden"></div>
+            <div class="transfer-foot">
+              <span id="sec-transfer-undo"></span>
+              <a id="sec-transfer-open" href="#manage/transfers" data-i18n="label.secTransferOpen">移管タブで見る</a>
+            </div>
           </section>
 
           <div class="stat-tiles">
@@ -623,6 +652,8 @@
                 <tbody></tbody>
               </table>
             </div>
+            <!-- 口座間の移管の履歴（警告ではないので、グラフの下ではなくここに小さく） -->
+            <p id="sec-transfer-route" class="transfer-route hidden"></p>
           </section>
 
           <section class="card">
@@ -675,7 +706,10 @@
 
           <!-- 取引履歴 -->
           <section id="tx-history-card" class="card hidden">
-            <h2 data-i18n="tx.historyTitle">取引履歴</h2>
+            <div class="tx-list-head">
+              <h2 data-i18n="tx.historyTitle">取引履歴</h2>
+              <div id="tx-history-view" class="tx-view-bar"></div>
+            </div>
             <div class="table-wrap">
               <table id="tx-history-table">
                 <thead>
@@ -1158,7 +1192,10 @@
 
           <!-- 取引プレビュー -->
           <section id="tx-preview" class="card import-section hidden">
-            <h2 data-i18n="tx.previewTitle">取引プレビュー</h2>
+            <div class="tx-list-head">
+              <h2 data-i18n="tx.previewTitle">取引プレビュー</h2>
+              <div id="tx-rows-view" class="tx-view-bar"></div>
+            </div>
             <div id="tx-preview-summary" class="import-note"></div>
             <div id="tx-type-bulk" class="settings-row hidden">
               <span id="tx-type-bulk-note" class="import-note"></span>
@@ -1218,6 +1255,8 @@
 
         <div class="import-tabs">
           <button class="import-tab manage-tab active" data-tab="sec" data-i18n="manage.tabSecurities">銘柄・保有</button>
+          <button class="import-tab manage-tab" data-tab="tx" data-i18n="manage.tabTx">取引</button>
+          <button class="import-tab manage-tab" data-tab="transfer" data-i18n="manage.tabTransfer">移管</button>
           <button class="import-tab manage-tab" data-tab="cash" data-i18n="manage.tabCash">現金・預金</button>
           <button class="import-tab manage-tab" data-tab="metal" data-i18n="manage.tabMetal">貴金属</button>
           <button class="import-tab manage-tab" data-tab="estate" data-i18n="manage.tabEstate">不動産</button>
@@ -1337,6 +1376,125 @@
                     <th class="num" data-i18n="th.quantity">数量</th>
                     <th class="num" data-i18n="th.avgCost">平均取得単価</th>
                     <th data-i18n="th.asOf">基準日</th>
+                    <th class="num" data-i18n="th.actions">操作</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+
+        <!-- 取引タブ（取引履歴をダウンロードできない証券会社のぶんを1件ずつ） -->
+        <div id="manage-tab-tx" class="manage-tab-content hidden">
+          <section class="card import-section">
+            <h2 data-i18n="manage.txTitle">取引を登録</h2>
+            <p id="mtx-prefill" class="mtx-prefill hidden"></p>
+            <p class="card-hint" data-i18n="manage.txHint">取引履歴をダウンロードできない証券会社の購入・売却を、1件ずつ登録します。登録した取引は、取り込んだ取引履歴と同じように、銘柄詳細の推移グラフ（最初の取込より前のさかのぼり）と取得原価の計算に使われます。</p>
+            <div class="manual-add-grid">
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.txAccount">口座 *</label>
+                <select id="mtx-account" class="settings-input"></select>
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.security">銘柄 *</label>
+                <select id="mtx-security" class="settings-input"></select>
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.txType">取引 *</label>
+                <select id="mtx-type" class="settings-input">
+                  <option value="buy" data-i18n="tx.type.buy">買付</option>
+                  <option value="sell" data-i18n="tx.type.sell">売却</option>
+                </select>
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.txDate">約定日 *</label>
+                <input id="mtx-date" class="settings-input" type="date" />
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.txQuantity">数量（株数・口数） *</label>
+                <input id="mtx-quantity" class="settings-input" type="number" step="any" min="0" />
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.txPrice">単価（投信は1万口あたりの基準価額）</label>
+                <input id="mtx-price" class="settings-input" type="number" step="any" min="0"
+                  data-i18n-placeholder="manage.txPricePh" placeholder="空欄なら約定日の価格" />
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" data-i18n="manage.txFee">手数料</label>
+                <input id="mtx-fee" class="settings-input" type="number" step="any" min="0" placeholder="0" />
+              </div>
+            </div>
+            <div class="settings-actions">
+              <button id="mtx-save" class="settings-save-btn" data-i18n="btn.add">追加</button>
+            </div>
+            <div id="mtx-result" class="settings-result hidden"></div>
+          </section>
+
+          <section class="card import-section">
+            <div class="tx-list-head">
+              <h2 data-i18n="manage.txListTitle">登録済みの取引（手動）</h2>
+              <div id="manage-tx-view" class="tx-view-bar"></div>
+            </div>
+            <p class="card-hint" data-i18n="manage.txListHint">ここで登録した取引だけが出ます。取り込んだ取引履歴は、データ取込の取込履歴からファイルごと巻き戻します。</p>
+            <div class="table-wrap">
+              <table id="manage-tx-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="tx.thTradeDate">約定日</th>
+                    <th data-i18n="th.account">口座</th>
+                    <th data-i18n="th.security">銘柄</th>
+                    <th data-i18n="tx.thType">種類</th>
+                    <th class="num" data-i18n="th.quantity">数量</th>
+                    <th class="num" data-i18n="tx.thUnitPrice">単価</th>
+                    <th class="num" data-i18n="tx.thNetAmount">受渡金額</th>
+                    <th class="num" data-i18n="th.actions">操作</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+
+        <!-- 移管タブ（証券会社間で移した銘柄の結び付け） -->
+        <div id="manage-tab-transfer" class="manage-tab-content hidden">
+          <section class="card import-section">
+            <h2 data-i18n="manage.trUnresolvedTitle">移管先を選んでください</h2>
+            <p class="card-hint" data-i18n="manage.trHint">株・投信を別の証券会社へ移した記録（取引履歴の出庫、または保有が 0 になった記録）を、移管先の口座で最初に現れた記録と結び付けます。結び付けると、銘柄詳細の推移グラフが移管の前後で1本の線になります。数量が一致して移管先が1つに決まるものは自動で結び付けます。ここには自動では決められなかったものが出ます。</p>
+            <div id="transfer-unresolved" class="transfer-list"></div>
+            <div id="transfer-result" class="settings-result hidden"></div>
+          </section>
+
+          <section class="card import-section">
+            <h2 data-i18n="manage.trLinksTitle">結び付けた移管</h2>
+            <div class="table-wrap">
+              <table id="transfer-links-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="th.security">銘柄</th>
+                    <th data-i18n="tr.thRoute">移管元 → 移管先</th>
+                    <th data-i18n="tr.thDate">移管日</th>
+                    <th class="num" data-i18n="th.quantity">数量</th>
+                    <th data-i18n="tr.thHow">判定</th>
+                    <th class="num" data-i18n="th.actions">操作</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="card import-section">
+            <h2 data-i18n="manage.trDismissedTitle">移管ではないとした記録</h2>
+            <div class="table-wrap">
+              <table id="transfer-dismissed-table">
+                <thead>
+                  <tr>
+                    <th data-i18n="th.security">銘柄</th>
+                    <th data-i18n="tr.thFrom">移管元</th>
+                    <th data-i18n="tr.thDate">移管日</th>
+                    <th class="num" data-i18n="th.quantity">数量</th>
                     <th class="num" data-i18n="th.actions">操作</th>
                   </tr>
                 </thead>

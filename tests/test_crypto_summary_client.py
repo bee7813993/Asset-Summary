@@ -117,6 +117,38 @@ def test_history_params():
     assert seen["params"] == {"currency": "USD", "range": "90d", "scope": "total"}
 
 
+def test_history_metric_is_sent_and_cached_separately():
+    """metric はクエリに載り、キャッシュも評価額とは別のキーで持つ。"""
+    seen = []
+
+    def handler(request):
+        params = dict(request.url.params)
+        seen.append(params)
+        if params.get("metric") == "balance":
+            return httpx.Response(200, json={
+                "metric": "balance", "points": [{"t": "2026-08-01", "balance": "0.3"}],
+            })
+        return httpx.Response(200, json={
+            "metric": "value", "points": [{"t": "2026-08-01", "value": "4400000"}],
+        })
+
+    _install(handler)
+    value = csc.fetch_cs_history("JPY", "90d", "asset:BTC", SUB)
+    balance = csc.fetch_cs_history("JPY", "90d", "asset:BTC", SUB, metric="balance")
+    assert seen == [
+        {"currency": "JPY", "range": "90d", "scope": "asset:BTC"},
+        {"currency": "JPY", "range": "90d", "scope": "asset:BTC", "metric": "balance"},
+    ]
+    assert value["metric"] == "value"
+    assert balance["metric"] == "balance"
+    # 2回目はどちらもキャッシュから。取り違えて評価額の応答を保有数量として返さない
+    assert csc.fetch_cs_history("JPY", "90d", "asset:BTC", SUB)["metric"] == "value"
+    assert csc.fetch_cs_history(
+        "JPY", "90d", "asset:BTC", SUB, metric="balance"
+    )["metric"] == "balance"
+    assert len(seen) == 2
+
+
 def test_ttl_cache_avoids_second_request():
     calls = []
 
@@ -336,6 +368,90 @@ def test_merge_history_forward_fill_and_no_backfill():
     assert points[3]["value"] == D("120")
     # cost は不変
     assert all(p["cost"] == D("50") for p in points)
+
+
+def test_cs_value_points_keep_only_points_with_a_value():
+    """評価額の点だけを渡す。null を渡すと画面の線がその日だけ 0 に落ちる。"""
+    pts = csc.cs_value_points(
+        [
+            {"t": "2026-08-01", "value": "4400000", "balance": "0.3"},
+            "garbage",
+            {"t": "2026-08-02", "value": None},
+            {"t": "2026-08-03", "value": ""},
+            {"value": "1"},                              # 日付が無い
+            {"t": "2026-08-04", "value": "0", "balance": "0"},  # 手放した日の 0 は残す
+        ]
+    )
+    assert pts == [
+        {"t": "2026-08-01", "value": "4400000"},
+        {"t": "2026-08-04", "value": "0"},
+    ]
+    assert csc.cs_value_points(None) == []
+
+
+def test_cs_quantity_points_come_from_the_balance_series():
+    """metric=balance の応答があれば、価格の無い日の点も保有数になる。"""
+    balance = {
+        "metric": "balance",
+        "points": [
+            {"t": "2026-08-01", "balance": "0.3"},
+            {"t": "2026-08-02", "balance": "0.3"},   # 価格が取れず評価額の点が無い日
+            {"t": "2026-08-03", "balance": "0"},     # 手放した日
+            "garbage",
+        ],
+    }
+    value = {"points": [{"t": "2026-08-01", "value": "4400000", "balance": "0.25"}]}
+    assert csc.is_balance_history(balance) is True
+    assert csc.cs_quantity_points(balance, value) == [
+        {"t": "2026-08-01", "quantity": "0.3"},
+        {"t": "2026-08-02", "quantity": "0.3"},
+        {"t": "2026-08-03", "quantity": "0"},
+    ]
+    # 評価額が取れなくても（価格の無いコイン）保有数は返る
+    assert csc.cs_quantity_points(balance, None)[0] == {"t": "2026-08-01", "quantity": "0.3"}
+
+
+def test_cs_quantity_points_fall_back_to_balance_on_value_points():
+    """metric を知らない古い CS は評価額の応答を返す（metric キーが無い）。"""
+    value = {
+        "points": [
+            {"t": "2026-08-01", "value": "4400000", "balance": "0.3"},
+            "garbage",
+            {"t": "2026-08-02", "value": "4500000"},   # balance を返さない CS
+        ]
+    }
+    expected = [{"t": "2026-08-01", "quantity": "0.3"}]
+    old_cs_reply = {"points": [{"t": "2026-08-01", "value": "4400000", "balance": "0.3"}]}
+    assert csc.is_balance_history(old_cs_reply) is False
+    assert csc.cs_quantity_points(old_cs_reply, value) == expected
+    # value に丸めた応答（asset スコープ以外）も保有数量の系列とはみなさない
+    rounded = {"metric": "value", "points": [{"t": "2026-08-01", "value": "1", "balance": "9"}]}
+    assert csc.is_balance_history(rounded) is False
+    assert csc.cs_quantity_points(rounded, value) == expected
+    # 保有数量の系列が取れなかったときも同じ
+    assert csc.cs_quantity_points(None, value) == expected
+    assert csc.cs_quantity_points(None, None) == []
+
+
+def test_cs_price_points_only_from_a_price_series():
+    """価格は metric=price の応答からだけ取る。古い CS の評価額の応答からは作らない。"""
+    price = {
+        "metric": "price",
+        "points": [
+            {"t": "2026-08-01", "price": "0.001935"},   # 1 未満の価格も文字列のまま
+            "garbage",
+            {"t": "2026-08-02", "price": None},
+            {"t": "2026-08-03", "price": "0.0021"},
+        ],
+    }
+    assert csc.cs_price_points(price) == [
+        {"t": "2026-08-01", "price": "0.001935"},
+        {"t": "2026-08-03", "price": "0.0021"},
+    ]
+    old_cs_reply = {"points": [{"t": "2026-08-01", "value": "4400000", "balance": "0.3"}]}
+    assert csc.cs_price_points(old_cs_reply) == []
+    assert csc.cs_price_points({"metric": "value", "points": []}) == []
+    assert csc.cs_price_points(None) == []
 
 
 def test_merge_history_empty_or_garbage():

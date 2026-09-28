@@ -15,9 +15,12 @@ from __future__ import annotations
 from bisect import bisect_right
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable
 
 from .models import Account, AssetClass, HoldingSnapshot, PriceSourceType, Security
+
+if TYPE_CHECKING:
+    from .cost_basis import QuantityPath
 
 ZERO = Decimal("0")
 
@@ -657,6 +660,67 @@ def summarize(
     }
 
 
+def _traced_snapshot(
+    firsts: list[HoldingSnapshot], quantity: Decimal
+) -> HoldingSnapshot:
+    """取引履歴でさかのぼった保有数を、最初のスナップショットの形の仮想ロットにする。
+
+    firsts は口座×銘柄の各ロットの最初のスナップショット。記載評価額（価格が
+    無いときの代わり）は数量に比例させ、平均取得単価はその加重平均にする。
+    """
+    held = sum((s.quantity for s in firsts), ZERO)
+    avg_cost = None
+    if held and all(s.avg_cost is not None for s in firsts):
+        avg_cost = sum((s.quantity * s.avg_cost for s in firsts), ZERO) / held
+    reported = None
+    if held and all(s.reported_value_jpy is not None for s in firsts):
+        reported = sum((s.reported_value_jpy for s in firsts), ZERO) * quantity / held
+    return firsts[0].model_copy(
+        update={"quantity": quantity, "avg_cost": avg_cost, "reported_value_jpy": reported}
+    )
+
+
+def _ledger_only_lot(
+    key: tuple[int, int],
+    securities: dict[int, Security],
+    price_series: dict[int, tuple[dict[str, Decimal], str]],
+    scope: tuple[str, str] | None,
+    excluded: set[Any],
+    ratio_by_security: dict[int, Decimal] | None,
+) -> tuple[dict[str, Any], HoldingSnapshot] | None:
+    """スナップショットの無い口座×銘柄を評価するための仮のロット。
+
+    1銘柄の推移にだけ使う（取引履歴の数量を足してよいのは単位の揃う1銘柄の中）。
+    記載評価額も平均取得単価も無いので、価格が無い日は評価額 0、保有数だけ数える。
+    """
+    account_id, security_id = key
+    sec = securities.get(security_id)
+    if sec is None or sec.asset_class in excluded:
+        return None
+    if scope is None or scope[0] != "security" or scope[1] != str(security_id):
+        return None
+    if ratio_by_security is not None and not ratio_by_security.get(security_id):
+        return None
+    series, ccy = price_series.get(security_id, ({}, sec.currency))
+    lot = {
+        "sec": sec,
+        "snaps": [],
+        "snap_dates": [],
+        "price": SeriesLookup(series),
+        "price_ccy": ccy,
+        "ratio": (
+            ratio_by_security.get(security_id, ZERO)
+            if ratio_by_security is not None
+            else Decimal("1")
+        ),
+    }
+    shape = HoldingSnapshot(
+        account_id=account_id, security_id=security_id, as_of_date=date.min,
+        quantity=ZERO, origin="ledger",
+    )
+    return (lot, shape)
+
+
 def daily_series(
     snapshots: Iterable[HoldingSnapshot],
     securities: dict[int, Security],
@@ -670,6 +734,7 @@ def daily_series(
     scope: tuple[str, str] | None = None,
     ratio_by_security: dict[int, Decimal] | None = None,
     cost_overrides: dict[tuple[int, int], Decimal] | None = None,
+    quantity_paths: dict[tuple[int, int], QuantityPath] | None = None,
 ) -> list[dict[str, Any]]:
     """日次評価額系列。
 
@@ -679,9 +744,23 @@ def daily_series(
     ratio_by_security: security_id → 計上率(0〜1)。タグ・Myポートフォリオの推移で
         「配分率ぶんだけ計上する」ために各銘柄の寄与へ掛ける。ここに載らない
         銘柄は集計から外れる（scope と違い銘柄ごとに重みを変えられる）。
+    quantity_paths: (口座, 銘柄) → 取引履歴から戻した、最初のスナップショットより
+        前の保有数（cost_basis.quantity_paths）。載っている口座×銘柄は、その期間を
+        「最初の保有数で遡及」ではなく実際の数量で評価する。
     返値: [{"t": ISO日付, "value": Decimal, "cost": Decimal|None}, ...]
+
+    scope が ("security", id) のときだけ、各点に保有数も載せる:
+    quantity（全口座・全ロットの合計）と backfilled（記録ではなく遡った数量を
+    含む — 最初のスナップショットの保有数で遡ったロット、または取引履歴より前から
+    あった期首ロット）。数量を足し合わせてよいのは単位が揃う1銘柄の中だけなので、
+    複数銘柄にまたがるスコープでは出さない。保有数は評価額と同じ数量で数える —
+    評価額の点が「その日の保有数 × 価格」なのだから、保有数の点はその保有数そのもの。
     """
-    excluded = _excluded_classes(settings)
+    single_security = scope is not None and scope[0] == "security"
+    # 「総資産に含める」は総資産を集計するときの規則で、1銘柄だけを見る推移には
+    # 当てはまらない（銘柄詳細のタイルも、総資産から外したクラスの銘柄をそのまま
+    # 出す）。ここで外すと、その銘柄の推移がゼロの横線になってしまう。
+    excluded = set() if single_security else _excluded_classes(settings)
     fx = FxLookup(fx_series)
     display_fx = SeriesLookup(jpy_per_display_series or {})
 
@@ -728,6 +807,66 @@ def daily_series(
             }
         )
 
+    # 取引履歴でさかのぼれる口座×銘柄。最初のスナップショットより前は
+    # ロットごとの遡及をやめ、台帳で戻した口座×銘柄の保有数を1本の仮想ロットと
+    # して評価する（単価・為替・記載値の扱いは実ロットと同じ）
+    traced: list[dict[str, Any]] = []
+    for key, path in (quantity_paths or {}).items():
+        members = [
+            p for p in prepared
+            if (p["snaps"][0].account_id, p["snaps"][0].security_id) == key
+        ]
+        if not members:
+            # スナップショットの無い口座×銘柄（売り切った・移管した、今は持って
+            # いない保有）。全期間を取引履歴の数量で、価格から評価する
+            ledger_only = _ledger_only_lot(
+                key, securities, price_series, scope, excluded, ratio_by_security
+            )
+            if ledger_only is not None:
+                traced.append({"lot": ledger_only[0], "path": path, "firsts": [ledger_only[1]]})
+            continue
+        for p in members:
+            p["traced"] = True
+        traced.append(
+            {"lot": members[0], "path": path, "firsts": [p["snaps"][0] for p in members]}
+        )
+
+    def _lot_worth(
+        p: dict[str, Any], snap: HoldingSnapshot, d: str
+    ) -> tuple[Decimal, Decimal | None]:
+        """1ロットのその日の (評価額JPY, 取得コストJPY)。計上率は掛け済み。"""
+        sec: Security = p["sec"]
+        ratio: Decimal = p["ratio"]
+        if sec.asset_class == AssetClass.CASH:
+            rate = fx.rate(sec.currency, d)
+            if rate is not None:
+                return (snap.quantity * rate * ratio, None)
+            if snap.reported_value_jpy is not None:
+                return (snap.reported_value_jpy * ratio, None)
+            return (ZERO, None)
+        price = p["price"].at(d)
+        if (
+            sec.asset_class == AssetClass.PENSION
+            and sec.price_source_type == PriceSourceType.TOUSHIN
+            and snap.quantity <= 1
+        ):
+            # 口数未導出の年金は価格で評価しない（lot_value_jpy と同じガード）
+            price = None
+        rate = fx.rate(p["price_ccy"], d) if price is not None else None
+        value = ZERO
+        if price is not None and rate is not None:
+            value = snap.quantity * price / Decimal(sec.price_unit_divisor) * rate * ratio
+        elif snap.reported_value_jpy is not None:
+            # 価格はあるがFXレートが無い場合も含む。1:1で円換算すると
+            # 外貨建て資産が桁違いに過少評価されるため、記載値へフォールバック
+            value = snap.reported_value_jpy * ratio
+        elif sec.asset_class == AssetClass.POINT:
+            value = snap.quantity * ratio
+        cost = lot_cost_jpy(
+            sec, snap, fx.rate(sec.currency, d), _cost_override(cost_overrides, snap)
+        )
+        return (value, cost * ratio if cost is not None else None)
+
     out: list[dict[str, Any]] = []
     day = start
     while day <= end:
@@ -735,55 +874,47 @@ def daily_series(
         total = ZERO
         total_cost = ZERO
         any_cost = False
+        quantity = ZERO
+        backfilled = False
+        held: list[tuple[dict[str, Any], HoldingSnapshot]] = []
         for p in prepared:
             snaps: list[HoldingSnapshot] = p["snaps"]
             i = bisect_right(p["snap_dates"], d)
+            if i == 0 and p.get("traced"):
+                continue  # 台帳でさかのぼる期間（下で口座×銘柄ごとに足す）
             # 初回登録日以前は最初のスナップショットの保有数で遡及（確定要件）
             snap = snaps[i - 1] if i > 0 else snaps[0]
             if snap.quantity == ZERO:
                 continue
-            sec: Security = p["sec"]
-            ratio: Decimal = p["ratio"]
-            if sec.asset_class == AssetClass.CASH:
-                rate = fx.rate(sec.currency, d)
-                if rate is not None:
-                    total += snap.quantity * rate * ratio
-                elif snap.reported_value_jpy is not None:
-                    total += snap.reported_value_jpy * ratio
+            if i == 0:
+                backfilled = True
+            held.append((p, snap))
+        for g in traced:
+            if day >= g["path"].before:
                 continue
-            price = p["price"].at(d)
-            if (
-                sec.asset_class == AssetClass.PENSION
-                and sec.price_source_type == PriceSourceType.TOUSHIN
-                and snap.quantity <= 1
-            ):
-                # 口数未導出の年金は価格で評価しない（lot_value_jpy と同じガード）
-                price = None
-            rate = fx.rate(p["price_ccy"], d) if price is not None else None
-            if price is not None and rate is not None:
-                total += (
-                    snap.quantity * price / Decimal(sec.price_unit_divisor) * rate * ratio
-                )
-            elif snap.reported_value_jpy is not None:
-                # 価格はあるがFXレートが無い場合も含む。1:1で円換算すると
-                # 外貨建て資産が桁違いに過少評価されるため、記載値へフォールバック
-                total += snap.reported_value_jpy * ratio
-            elif sec.asset_class == AssetClass.POINT:
-                total += snap.quantity * ratio
-            cost = lot_cost_jpy(
-                sec, snap, fx.rate(sec.currency, d), _cost_override(cost_overrides, snap)
-            )
+            q, assumed = g["path"].at(day)
+            if q == ZERO:
+                continue
+            backfilled = backfilled or assumed
+            held.append((g["lot"], _traced_snapshot(g["firsts"], q)))
+        for p, snap in held:
+            quantity += snap.quantity
+            value, cost = _lot_worth(p, snap, d)
+            total += value
             if cost is not None:
-                total_cost += cost * ratio
+                total_cost += cost
                 any_cost = True
         disp = display_fx.at(d) if display_fx else None
         divisor = disp if disp else Decimal("1")
-        out.append(
-            {
-                "t": d,
-                "value": total / divisor,
-                "cost": (total_cost / divisor) if any_cost else None,
-            }
-        )
+        point: dict[str, Any] = {
+            "t": d,
+            "value": total / divisor,
+            "cost": (total_cost / divisor) if any_cost else None,
+        }
+        if single_security:
+            # 数量は金額ではないので表示通貨で割らない
+            point["quantity"] = quantity
+            point["backfilled"] = backfilled
+        out.append(point)
         day += timedelta(days=1)
     return out

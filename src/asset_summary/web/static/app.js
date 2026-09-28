@@ -44,15 +44,33 @@ let _acctRange = localStorage.getItem("as_acct_range") || "90d";
 let _pfRange = localStorage.getItem("as_pf_range") || "90d";
 let _secRange = localStorage.getItem("as_sec_range") || "1y";
 
+// 推移グラフの表示対象タブ（localStorage 記憶）。保有数を足し合わせてよいのは
+// 1銘柄の中だけなので、切替があるのは銘柄詳細と CS コイン詳細の推移だけ
+function _loadChoice(storageKey, allowed, fallback) {
+  const saved = localStorage.getItem(storageKey);
+  return allowed.includes(saved) ? saved : fallback;
+}
+let _secMetric = _loadChoice("as_sec_metric", ["price", "value", "quantity"], "price");
+let _csAssetMetric = _loadChoice("as_cs_metric", ["price", "value", "quantity"], "value");
+
 // 詳細ページの現在対象
 let _classDetailId = null;
 let _acctDetailName = null;
 let _secDetailId = null;
+// 銘柄詳細の推移グラフの材料。価格は /api/security の応答に同梱、評価額と保有数は
+// 1銘柄スコープの /api/portfolio-history の同じ点列（切替のたびに取り直さない）
+let _secPrice = null;       // {history, avgCost, currency}
+let _secHoldHist = null;    // {key, data}
+let _secHistReq = 0;        // 待つ間に表示対象が変わったら古い応答で描かない
+let _secQtyDigits = 4;      // 表示中の銘柄の数量の小数桁（qtyDigits。既定は QTY_DIGITS と同じ）
+// 移管タブを開いたとき、この銘柄の項目・行へ移る（銘柄詳細のリンクから来たとき）
+let _transferFocusId = null;
 
 // Crypto-Summary 連携（コイン別サブビュー）
 let _csAssetSym = null;
 let _csAssetRange = localStorage.getItem("as_cs_range") || "90d";
 let _csAssetChart = null;
+let _csAssetHist = null;    // {points, quantityPoints, pricePoints, currency} — 評価額・保有数・価格の点列
 let _csCoinIcons = null;    // {SYM: url} — 起動時に一度だけ取得
 
 // キャッシュ
@@ -110,15 +128,19 @@ function fmtMoney(value, currency) {
   return sym + n.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits });
 }
 
-// 単価用: JPYでも小数を保持（基準価額・平均取得単価など）
+// 単価用: JPYでも小数を保持（基準価額・平均取得単価など）。
+// 1 未満は有効数字 4 桁で出す。暗号資産には 1 未満の価格（DOGE の $0.1234、
+// SHIB の ¥0.001935 など）が多く、小数の桁数で切ると 0 に潰れる
+// （Crypto-Summary の fmtPrice と同じ規則。1 以上は従来どおり）
 function fmtPrice(value, currency) {
   if (value === null || value === undefined || value === "") return "—";
   if (maskAmounts) return (CURRENCY_SYMBOL[currency] || "") + "●●●●●";
   const n = Number(value);
   if (!isFinite(n)) return "—";
-  const maxDigits = currency === "JPY" ? 2 : 4;
-  return (CURRENCY_SYMBOL[currency] || "") +
-    n.toLocaleString(undefined, { maximumFractionDigits: maxDigits });
+  const digits = n !== 0 && Math.abs(n) < 1
+    ? { maximumSignificantDigits: 4 }
+    : { maximumFractionDigits: currency === "JPY" ? 2 : 4 };
+  return (CURRENCY_SYMBOL[currency] || "") + n.toLocaleString(undefined, digits);
 }
 
 // JPY 専用: 億・万・円 のサブ表示
@@ -165,12 +187,32 @@ function fmtMoneyShort(value, currency) {
   return fmtMoney(value, currency);
 }
 
-function fmtAmount(value) {
+// 数量の小数の桁数。株数・口数・グラムは 4 桁で足りる（それより細かいのは端数の
+// ノイズ）。暗号資産は 1 枚が高く 0.0001 未満にも意味があるので 8 桁まで出す
+// （Crypto-Summary の表示と同じ。BTC の最小単位 1 satoshi は 0.00000001）
+const QTY_DIGITS = 4;
+const CRYPTO_QTY_DIGITS = 8;
+
+function qtyDigits(assetClass) {
+  return assetClass === "crypto" ? CRYPTO_QTY_DIGITS : QTY_DIGITS;
+}
+
+function fmtAmount(value, digits = QTY_DIGITS) {
   if (value === null || value === undefined || value === "") return "—";
   if (maskAmounts) return "●●●●●";
   const n = Number(value);
   if (!isFinite(n)) return "—";
-  return n.toLocaleString(undefined, { maximumFractionDigits: 4 });
+  return n.toLocaleString(undefined, { maximumFractionDigits: digits });
+}
+
+// 狭い画面の縦軸用: 桁の大きい数量を「144万」「1.4M」に畳む（fmtMoneyShort の数量版）
+function fmtAmountShort(value, digits = QTY_DIGITS) {
+  const n = Number(value);
+  if (maskAmounts || value === null || value === undefined || value === "" || !isFinite(n)) {
+    return fmtAmount(value, digits);
+  }
+  if (Math.abs(n) < 10_000) return fmtAmount(value, digits);
+  return n.toLocaleString(undefined, { notation: "compact", maximumFractionDigits: 1 });
 }
 
 // 損益額: 符号付き。JPYは「+123,456円」形式、他通貨は「+$1,234.56」。
@@ -621,7 +663,7 @@ function router() {
   } else if (page === "import") {
     loadImportPage();
   } else if (page === "manage") {
-    loadManagePage();
+    loadManagePage(sub, params);
   } else if (page === "settings") {
     loadSettingsPage();
   }
@@ -761,6 +803,7 @@ function renderHoldingsRows(tbody, holdings, currency, opts = {}) {
   }
   holdings.forEach((h) => {
     const isCS = h.origin === "crypto_summary";
+    const qd = qtyDigits(h.asset_class);
     const tr = document.createElement("tr");
     tr.className = "clickable" + (h.in_total === false ? " row-dim" : "");
     const refBadge = h.has_price === false && h.value != null
@@ -776,13 +819,13 @@ function renderHoldingsRows(tbody, holdings, currency, opts = {}) {
     // 銘柄単位に合算した行は口座が「A 他N件」表示になる。内訳は title で補う
     const accts = Array.isArray(h.accounts) ? h.accounts : [];
     const acctTitle = accts.length > 1
-      ? accts.map((a) => `${a.account}: ${fmtAmount(a.quantity)}`).join("\n")
+      ? accts.map((a) => `${a.account}: ${fmtAmount(a.quantity, qd)}`).join("\n")
       : "";
     const acctAttr = acctTitle ? ` title="${escapeHtml(acctTitle)}"` : "";
     // スマホ縦持ち用の数量サブ表示（CSSで切替。横持ち・PCは数量の列で出す）。
     // 現金・不動産など数量が常に1の行では出さない（ノイズになるだけのため）
     const qtySub = h.quantity != null && Number(h.quantity) !== 1
-      ? `<span class="qty-sub">${escapeHtml(t("th.quantity"))} ${fmtAmount(h.quantity)}</span>`
+      ? `<span class="qty-sub">${escapeHtml(t("th.quantity"))} ${fmtAmount(h.quantity, qd)}</span>`
       : "";
     // 価格変動しない資産（現金・ポイント・年金 = 価格取得が不要）は、カードでは
     // 現在値〜評価損益の行を出さない（全部「—」の行が並ぶだけのため）。
@@ -805,7 +848,7 @@ function renderHoldingsRows(tbody, holdings, currency, opts = {}) {
         </span>${qtySub}
       </td>
       <td${acctAttr}>${escapeHtml(h.account || "")}</td>
-      <td class="num"${qtyLabel}>${fmtAmount(h.quantity)}</td>
+      <td class="num"${qtyLabel}>${fmtAmount(h.quantity, qd)}</td>
       <td class="num">${fmtPrice(h.avg_cost, h.currency || currency)}</td>
       <td class="num"${fluctLabel(`${t("th.currentPrice")}（${t("th.avgCost")}）`)}>
         <span class="price-plain">${fmtPrice(h.price, h.currency || currency)}</span>
@@ -823,7 +866,7 @@ function renderHoldingsRows(tbody, holdings, currency, opts = {}) {
     });
     _appendDetailToggle(tr, [
       { label: t("th.account"), value: escapeHtml(h.account || "") },
-      { label: t("th.quantity"), value: fmtAmount(h.quantity) },
+      { label: t("th.quantity"), value: fmtAmount(h.quantity, qd) },
       { label: t("th.avgCost"), value: fmtPrice(h.avg_cost, h.currency || currency) },
       { label: t("th.currentPrice"), value: fmtPrice(h.price, h.currency || currency) },
       { label: t("th.dayChange"), value: dayChangeCellHtml(h, currency) },
@@ -835,14 +878,23 @@ function renderHoldingsRows(tbody, holdings, currency, opts = {}) {
 
 // ---- 推移グラフ（グラデーション折れ線） ----
 
-function renderHistoryChart(canvasId, points, currency, existingChart) {
+// opts.metric: "value"（評価額・既定）| "quantity"（保有数）。保有数の点を
+// 持つのは1銘柄の推移（銘柄詳細・CS コイン詳細）だけ。
+// opts.digits: 保有数の小数の桁数（既定 QTY_DIGITS。暗号資産は CRYPTO_QTY_DIGITS）
+function renderHistoryChart(canvasId, points, currency, existingChart, opts = {}) {
   const canvas = document.getElementById(canvasId);
   if (!canvas) return null;
   if (existingChart) existingChart.destroy();
 
   const emptyEl = canvas.parentElement.querySelector(".history-empty");
+  const isQty = opts.metric === "quantity";
+  const digits = opts.digits || QTY_DIGITS;
+  // 値の無い点（保有数を返さない旧 CS の点など）は描けないので落とす。
+  // Number(null) は 0 なので、残すと線がその日だけ 0 に落ちる
+  const key = isQty ? "quantity" : "value";
+  const rows = (points || []).filter((p) => p[key] != null && p[key] !== "");
 
-  if (!points || points.length < 2) {
+  if (rows.length < 2) {
     canvas.style.display = "none";
     if (emptyEl) emptyEl.classList.remove("hidden");
     return null;
@@ -850,8 +902,8 @@ function renderHistoryChart(canvasId, points, currency, existingChart) {
   canvas.style.display = "";
   if (emptyEl) emptyEl.classList.add("hidden");
 
-  const labels = points.map((p) => p.t);
-  const values = points.map((p) => Number(p.value));
+  const labels = rows.map((p) => p.t);
+  const values = rows.map((p) => Number(p[key]));
 
   // 狭い描画域（スマホ縦持ちなど）では日付を "MM-DD" に短縮し、本数も減らす。
   // フル表記のままだと "2026-08-17" が隣とくっついて読めない。完全な日付は
@@ -861,7 +913,7 @@ function renderHistoryChart(canvasId, points, currency, existingChart) {
 
   const th = chartTheme();
   const datasets = [{
-    label: "value",
+    label: isQty ? "quantity" : "value",
     data: values,
     borderColor: "#2f81f7",
     backgroundColor(ctx) {
@@ -881,6 +933,22 @@ function renderHistoryChart(canvasId, points, currency, existingChart) {
   // 取得コスト線は引かない: 取得原価を持たない資産（現金・ポイント・年金など）も
   // 評価額には乗るので、合計取得コストは常に過少で評価額と比べられない。
   // 併せて縦軸が評価額だけで決まり、変動が潰れずに見えるようになる。
+  if (isQty) {
+    // 保有数は記録（スナップショット）のある日にだけ変わる階段。なめらかに
+    // 結ぶと、記録の間に少しずつ買い増したように見えてしまう
+    datasets[0].tension = 0;
+    datasets[0].stepped = true;
+    // 初回の記録より前は、最初に記録された保有数をさかのぼって当てはめた値
+    // （評価額の遡及と同じ規則）。記録と見分けが付くよう破線にする。
+    // 階段の横棒は始点の値なので、始点が遡及ならその区間を破線にする
+    if (rows.some((p) => p.backfilled)) {
+      datasets[0].segment = {
+        borderDash: (ctx) =>
+          rows[ctx.p0DataIndex] && rows[ctx.p0DataIndex].backfilled ? [6, 4] : undefined,
+      };
+    }
+  }
+  const fmtY = (v) => (isQty ? fmtAmount(v, digits) : fmtMoney(v, currency));
 
   return new Chart(canvas, {
     type: "line",
@@ -905,10 +973,16 @@ function renderHistoryChart(canvasId, points, currency, existingChart) {
           border: { display: false },
         },
         y: {
+          // 保有数は 0 からの量として見せる（軸を切ると、数株の買い増しが
+          // 倍増のように見える）。評価額は変動が見えるよう従来どおり自動
+          beginAtZero: isQty,
           ticks: {
             color: th.tick,
             font: { size: 11 },
-            callback(v) { return narrow ? fmtMoneyShort(v, currency) : fmtMoney(v, currency); },
+            callback(v) {
+              if (isQty) return narrow ? fmtAmountShort(v, digits) : fmtAmount(v, digits);
+              return narrow ? fmtMoneyShort(v, currency) : fmtMoney(v, currency);
+            },
           },
           grid: { color: th.grid },
           border: { display: false },
@@ -925,7 +999,11 @@ function renderHistoryChart(canvasId, points, currency, existingChart) {
           padding: 10,
           callbacks: {
             title: ([item]) => (item ? item.label : ""),
-            label: (item) => "  " + fmtMoney(item.parsed.y, currency),
+            label: (item) => "  " + fmtY(item.parsed.y),
+            afterLabel: (item) => {
+              const p = rows[item.dataIndex];
+              return isQty && p && p.backfilled ? "  " + t("chart.backfilledTip") : undefined;
+            },
           },
         },
       },
@@ -940,6 +1018,34 @@ function _setRangeActive(tabsId, range) {
     btn.classList.toggle("active", btn.dataset.range === range));
 }
 
+function _setMetricActive(tabsId, metric) {
+  const tabs = document.getElementById(tabsId);
+  if (!tabs) return;
+  tabs.querySelectorAll(".range-tab").forEach((btn) =>
+    btn.classList.toggle("active", btn.dataset.metric === metric));
+}
+
+/** data-i18n ごと差し替えて文言を入れる（言語切替の applyI18n で元に戻らないように）。 */
+function _setI18nText(el, key) {
+  if (!el) return;
+  el.setAttribute("data-i18n", key);
+  el.textContent = t(key);
+}
+
+/** 評価額推移の注記（取得中・価格未取得・手動評価待ち）。HTML 片の配列を返す。 */
+function _historyNotes(data) {
+  const notes = [];
+  if (data.is_partial) notes.push(t("label.historyPartial"));
+  if (data.unpriced && data.unpriced.length) {
+    notes.push(t("label.unpricedAssets") + data.unpriced.map(escapeHtml).join(", "));
+  }
+  // 手動評価待ちは「取得中」ではない。待っても出ないので入力を促す
+  if (data.needs_valuation && data.needs_valuation.length) {
+    notes.push(t("label.needsValuation") + data.needs_valuation.map(escapeHtml).join(", "));
+  }
+  return notes;
+}
+
 async function _fetchHistAndRender(scope, range, canvasId, loadingId, unpricedId, getRef, setRef) {
   const currency = currentCurrency();
   const loading = document.getElementById(loadingId);
@@ -951,15 +1057,7 @@ async function _fetchHistAndRender(scope, range, canvasId, loadingId, unpricedId
     );
     setRef(renderHistoryChart(canvasId, data.points, currency, getRef()));
     if (unpricedEl) {
-      const notes = [];
-      if (data.is_partial) notes.push(t("label.historyPartial"));
-      if (data.unpriced && data.unpriced.length) {
-        notes.push(t("label.unpricedAssets") + data.unpriced.map(escapeHtml).join(", "));
-      }
-      // 手動評価待ちは「取得中」ではない。待っても出ないので入力を促す
-      if (data.needs_valuation && data.needs_valuation.length) {
-        notes.push(t("label.needsValuation") + data.needs_valuation.map(escapeHtml).join(", "));
-      }
+      const notes = _historyNotes(data);
       if (notes.length) {
         unpricedEl.innerHTML = notes.join("<br>");
         unpricedEl.classList.remove("hidden");
@@ -1867,12 +1965,16 @@ async function showCsAssetDetail(sym, range) {
     document.getElementById(id).textContent = "—";
   });
   tbody.innerHTML = "";
+  // 読み込み中に表示対象を切り替えても、前のコインの点列で描かない
+  _csAssetHist = null;
+  _syncCsAssetHistoryHeader();
   loading.classList.remove("hidden");
   try {
     const data = await fetchJSON(
       `/api/crypto-summary/asset/${encodeURIComponent(sym)}?currency=${currency}&range=${_csAssetRange}`
     );
-    document.getElementById("cs-tile-balance").textContent = fmtAmount(data.balance);
+    document.getElementById("cs-tile-balance").textContent =
+      fmtAmount(data.balance, CRYPTO_QTY_DIGITS);
     document.getElementById("cs-tile-price").textContent = fmtPrice(data.price, currency);
     document.getElementById("cs-tile-value").textContent = fmtMoney(data.value, currency);
     document.getElementById("cs-tile-day-change").innerHTML = dayChangeCellHtml(data, currency);
@@ -1882,15 +1984,20 @@ async function showCsAssetDetail(sym, range) {
       )}</span>`;
     }
 
-    _csAssetChart = renderHistoryChart(
-      "cs-asset-history-chart", (data.history || {}).points || [], currency, _csAssetChart
-    );
+    const hist = data.history || {};
+    _csAssetHist = {
+      points: hist.points || [],
+      quantityPoints: hist.quantity_points || [],
+      pricePoints: hist.price_points || [],
+      currency,
+    };
+    renderCsAssetHistory();
 
     (data.accounts || []).forEach((a) => {
       const tr = document.createElement("tr");
       tr.innerHTML = `
         <td>${escapeHtml(a.account || "")}</td>
-        <td class="num">${fmtAmount(a.balance)}</td>
+        <td class="num">${fmtAmount(a.balance, CRYPTO_QTY_DIGITS)}</td>
         <td class="num">${fmtMoney(a.value, currency)}</td>
       `;
       tbody.appendChild(tr);
@@ -1904,11 +2011,50 @@ async function showCsAssetDetail(sym, range) {
       renderWarningsInto(warnEl, data.warnings);
     }
   } catch (e) {
-    _csAssetChart = renderHistoryChart("cs-asset-history-chart", [], currency, _csAssetChart);
+    _csAssetHist = null;
+    renderCsAssetHistory();
     renderWarningsInto(warnEl, [], "⚠ " + escapeHtml(t("status.error")) + escapeHtml(e.message));
   } finally {
     loading.classList.add("hidden");
   }
+}
+
+/**
+ * CS コイン詳細の推移を、選んでいる表示対象（価格・評価額・保有数）で描く。
+ * 保有数は CS の metric=balance の日次の保有数量（古い CS では評価額の点に
+ * 付いた残高）、価格は metric=price の日次終値（古い CS には無い）。点の並ぶ日が
+ * それぞれ違う（価格の無い日も保有数は欠けず、価格は持つ前の日にもある）ので
+ * 別々の点列で受け取る。どれも読み込み時に取得済みなので切替では取り直さない。
+ */
+function renderCsAssetHistory() {
+  _syncCsAssetHistoryHeader();
+  const h = _csAssetHist || {};
+  const currency = h.currency || currentCurrency();
+  if (_csAssetMetric === "price") {
+    // CS には平均取得単価が無いので、銘柄詳細にある取得単価の破線は引かない
+    _csAssetChart = renderPriceChart(
+      "cs-asset-history-chart", h.pricePoints || [], null, currency, _csAssetChart
+    );
+    return;
+  }
+  const isQty = _csAssetMetric === "quantity";
+  _csAssetChart = renderHistoryChart(
+    "cs-asset-history-chart", (isQty ? h.quantityPoints : h.points) || [],
+    currency, _csAssetChart, { metric: _csAssetMetric, digits: CRYPTO_QTY_DIGITS }
+  );
+}
+
+/** 表示対象タブ・見出し・空のときの文言（読み込みを待たずに合わせる。既定以外を記憶しているとき用）。 */
+function _syncCsAssetHistoryHeader() {
+  _setMetricActive("cs-asset-metric-tabs", _csAssetMetric);
+  _setI18nText(
+    document.getElementById("cs-asset-history-title"), _HISTORY_METRIC_TITLE[_csAssetMetric]
+  );
+  // 価格が無いのと推移が無いのは別の理由なので、空のときの文言も分ける
+  _setI18nText(
+    document.getElementById("cs-asset-history-chart").parentElement.querySelector(".history-empty"),
+    _csAssetMetric === "price" ? "label.noPriceData" : "label.noHistData"
+  );
 }
 
 // ---- 口座別ページ ----
@@ -2241,16 +2387,17 @@ wireSortableTable("pf-holdings-table", _pfSort, () => renderPortfolioDetail(_pfD
 
 // ---- 銘柄詳細 ----
 
-function renderPriceChart(priceHistory, avgCost, currency) {
-  const canvas = document.getElementById("price-chart");
-  if (!canvas) return;
-  if (_priceChart) { _priceChart.destroy(); _priceChart = null; }
+// 価格の推移（銘柄詳細・CS コイン詳細）。avgCost を渡すと平均取得単価の水平破線を引く
+function renderPriceChart(canvasId, priceHistory, avgCost, currency, existingChart) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return null;
+  if (existingChart) existingChart.destroy();
 
   const emptyEl = canvas.parentElement.querySelector(".history-empty");
   if (!priceHistory || priceHistory.length < 2) {
     canvas.style.display = "none";
     if (emptyEl) emptyEl.classList.remove("hidden");
-    return;
+    return null;
   }
   canvas.style.display = "";
   if (emptyEl) emptyEl.classList.add("hidden");
@@ -2305,7 +2452,7 @@ function renderPriceChart(priceHistory, avgCost, currency) {
     });
   }
 
-  _priceChart = new Chart(canvas, {
+  return new Chart(canvas, {
     type: "line",
     data: { labels, datasets },
     options: {
@@ -2357,6 +2504,106 @@ function renderPriceChart(priceHistory, avgCost, currency) {
   });
 }
 
+const _HISTORY_METRIC_TITLE = {
+  price: "label.priceHistorySection",
+  value: "label.valueHistorySection",
+  quantity: "label.quantityHistorySection",
+};
+
+/** 表示対象タブ・見出し・空のときの文言（読み込みを待たずに合わせる）。 */
+function _syncSecHistoryHeader() {
+  _setMetricActive("sec-metric-tabs", _secMetric);
+  _setI18nText(document.getElementById("sec-history-title"), _HISTORY_METRIC_TITLE[_secMetric]);
+  _setI18nText(
+    document.getElementById("price-chart").parentElement.querySelector(".history-empty"),
+    _secMetric === "price" ? "label.noPriceData" : "label.noHistData"
+  );
+}
+
+/**
+ * 銘柄詳細の推移グラフを、選んでいる表示対象（価格・評価額・保有数）で描く。
+ * 価格は /api/security の応答に同梱。評価額と保有数は1銘柄スコープの
+ * /api/portfolio-history の同じ点列から描き分けるので、この2つの切替では取り直さない。
+ */
+async function renderSecurityHistory() {
+  const req = ++_secHistReq;
+  const metric = _secMetric;
+  const loading = document.getElementById("price-history-loading");
+  const note = document.getElementById("sec-history-note");
+  _syncSecHistoryHeader();
+  loading.classList.add("hidden");
+  note.classList.add("hidden");
+
+  if (metric === "price") {
+    const p = _secPrice || {};
+    _priceChart = renderPriceChart("price-chart", p.history || [], p.avgCost, p.currency, _priceChart);
+    return;
+  }
+
+  const currency = currentCurrency();
+  const key = `${_secDetailId}|${_secRange}|${currency}`;
+  let data = _secHoldHist && _secHoldHist.key === key ? _secHoldHist.data : null;
+  if (!data) {
+    loading.classList.remove("hidden");
+    try {
+      data = await fetchJSON(
+        `/api/portfolio-history?scope=${encodeURIComponent(`security:${_secDetailId}`)}` +
+        `&range=${_secRange}&currency=${currency}`
+      );
+    } catch (e) {
+      console.warn("[asset-summary] security history:", e);
+    }
+    // 待つ間に銘柄・範囲・表示対象が変わったら、そちらの描画に任せる
+    if (req !== _secHistReq) return;
+    loading.classList.add("hidden");
+    if (data) _secHoldHist = { key, data };
+  }
+
+  const points = (data && data.points) || [];
+  _priceChart = renderHistoryChart(
+    "price-chart", points, (data && data.currency) || currency, _priceChart,
+    { metric, digits: _secQtyDigits }
+  );
+  const notes = [];
+  if (metric === "quantity") {
+    // 遡及した区間（破線）が範囲に入っているときだけ、どこから記録かを断る
+    const recorded = points.find((p) => !p.backfilled);
+    if (points.length && points[0].backfilled && recorded) {
+      let text = escapeHtml(t("label.quantityBackfilled", { date: recorded.t }));
+      // 遡って描いている口座ごとに、その保有を買った取引の登録へ（数量などを入れて開く）
+      const regs = (data && data.carried_back) || [];
+      if (regs.length) {
+        text += " " + escapeHtml(t("label.backfillRegister")) + " " + regs.map((r) =>
+          `<a href="${escapeHtml(_manualTxHash({
+            security: _secDetailId, account: r.account_id, quantity: r.quantity,
+            price: r.unit_price, date: r.acquired_on, until: r.until,
+          }))}">${escapeHtml(t("label.backfillRegisterLink", {
+            account: r.account, qty: fmtAmount(r.quantity, _secQtyDigits),
+          }))}</a>`).join("・");
+      }
+      notes.push(text);
+    }
+  } else if (data) {
+    notes.push(..._historyNotes(data));
+  }
+  // 結び付いた移管そのものは警告ではないので、ここ（グラフの下の枠）には出さない
+  // （口座別内訳の下に小さく添える: renderSecTransferRoute）。
+  // 移管先の最初の記録が、移ってきた数量より多い（残りは移管より前から持っていた扱い）。
+  // 移管の後に買い足した分なら、取引に登録すれば買った日から数えられる
+  ((data && data.transfer_remainders) || []).forEach((r) => {
+    const register = _manualTxHash({
+      security: _secDetailId, account: r.account_id, quantity: r.quantity, until: r.first_date,
+    });
+    notes.push(escapeHtml(t("label.transferRemainder", {
+      account: r.account, date: r.first_date, qty: fmtAmount(r.quantity, _secQtyDigits),
+    })) + ` <a href="${escapeHtml(register)}">${escapeHtml(t("label.transferRemainderLink"))}</a>`);
+  });
+  if (notes.length) {
+    note.innerHTML = notes.join("<br>");
+    note.classList.remove("hidden");
+  }
+}
+
 function priceSourceHtml(sec) {
   const status = sec.price_source_status;
   if (status === "linked") {
@@ -2394,11 +2641,20 @@ async function showSecurityDetail(id, range) {
   document.getElementById("holdings-list-view").classList.add("hidden");
   document.getElementById("security-detail-view").classList.remove("hidden");
 
-  if (_secDetailId !== id) _secRange = localStorage.getItem("as_sec_range") || "1y";
+  if (_secDetailId !== id) {
+    _secRange = localStorage.getItem("as_sec_range") || "1y";
+    document.getElementById("sec-transfer-card").classList.add("hidden");
+  }
   if (range != null) _secRange = range;
   _secDetailId = id;
   localStorage.setItem("as_sec_range", _secRange);
   _setRangeActive("sec-range-tabs", _secRange);
+  // 推移の点列はこの表示のあいだの切替にだけ使い回す（銘柄・範囲を変えたときや、
+  // 取込のあとに開き直したときは取り直す）
+  _secPrice = null;
+  _secHoldHist = null;
+  _secQtyDigits = QTY_DIGITS;
+  _syncSecHistoryHeader();
 
   const currency = currentCurrency();
   const loading = document.getElementById("security-detail-loading");
@@ -2408,6 +2664,7 @@ async function showSecurityDetail(id, range) {
       `/api/security/${encodeURIComponent(id)}?currency=${currency}&range=${_secRange}`
     );
     const sec = data.security || {};
+    _secQtyDigits = qtyDigits(sec.asset_class);
 
     document.getElementById("security-detail-name").textContent = sec.name || "";
     const meta = document.getElementById("security-detail-meta");
@@ -2420,7 +2677,7 @@ async function showSecurityDetail(id, range) {
     // 統計タイル
     const tiles = data.tiles || {};
     const secCur = sec.currency || currency;
-    document.getElementById("tile-quantity").textContent = fmtAmount(tiles.quantity);
+    document.getElementById("tile-quantity").textContent = fmtAmount(tiles.quantity, _secQtyDigits);
     document.getElementById("tile-avg-cost").textContent = fmtPrice(tiles.avg_cost, secCur);
     document.getElementById("tile-price").textContent = fmtPrice(tiles.price, secCur);
     document.getElementById("tile-value").innerHTML =
@@ -2432,11 +2689,15 @@ async function showSecurityDetail(id, range) {
     document.getElementById("tile-pl").innerHTML = plAmountHtml(tiles.pl, currency);
     document.getElementById("tile-pl-pct").innerHTML = plPctHtml(tiles.pl_pct);
 
-    // 価格チャート（平均取得単価の水平破線つき）
-    renderPriceChart(data.price_history || [], tiles.avg_cost, secCur);
+    // 推移グラフ（価格・評価額・保有数の切替。平均取得単価の水平破線は価格のみ）。
+    // 評価額・保有数は別の取得になるので、待たずにページの残りを描く
+    _secPrice = { history: data.price_history || [], avgCost: tiles.avg_cost, currency: secCur };
+    renderSecurityHistory();
 
     // 警告
     renderWarningsInto(document.getElementById("security-warnings"), data.warnings, "");
+    // 移管先を決められなかった移管元（移管タブへ行かなくても、ここで選べる）
+    renderSecTransferCard(data.transfer_unresolved || []);
 
     // 口座別内訳
     const atbody = document.querySelector("#security-accounts-table tbody");
@@ -2445,7 +2706,7 @@ async function showSecurityDetail(id, range) {
       const tr = document.createElement("tr");
       tr.innerHTML = `
         <td>${escapeHtml(a.account)}</td>
-        <td class="num">${fmtAmount(a.quantity)}</td>
+        <td class="num">${fmtAmount(a.quantity, _secQtyDigits)}</td>
         <td class="num">${fmtPrice(a.avg_cost, secCur)}</td>
         <td class="num">${fmtMoney(a.value, currency)}</td>
         <td class="num">${dayChangeCellHtml(a, currency)}</td>
@@ -2457,6 +2718,7 @@ async function showSecurityDetail(id, range) {
     if ((data.accounts || []).length === 0) {
       atbody.innerHTML = `<tr><td colspan="7" class="muted">${t("label.noData")}</td></tr>`;
     }
+    renderSecTransferRoute(data.transfers || []);
 
     // ロット一覧
     const ltbody = document.querySelector("#security-lots-table tbody");
@@ -2467,7 +2729,7 @@ async function showSecurityDetail(id, range) {
         <td>${escapeHtml(l.account)}</td>
         <td>${l.lot_seq != null ? l.lot_seq : ""}</td>
         <td>${escapeHtml(l.lot_label || "")}</td>
-        <td class="num">${fmtAmount(l.quantity)}</td>
+        <td class="num">${fmtAmount(l.quantity, _secQtyDigits)}</td>
         <td class="num">${fmtPrice(l.avg_cost, secCur)}</td>
         <td>${escapeHtml(l.acquired_on || "—")}</td>
         <td>${escapeHtml(l.as_of || "")}</td>
@@ -2909,9 +3171,180 @@ function txThreshold(key, fallback) {
   return typeof th[key] === "number" ? th[key] : fallback;
 }
 let _txHistoryOffset = 0;
+let _txHistReq = 0;             // 並び順・表示を続けて変えたとき、古い応答で描かない
+let _txHistCtx = null;          // {securityId, secCur, currency} — 切替で読み直すため
+const _txHistOpen = new Set();  // 月ごとの表示で開いている月（"YYYY-MM"）
+let _manualTxRows = [];
+const _manualTxOpen = new Set();
+const _txPreviewOpen = new Set();
 
 function txTypeLabel(kind) {
   return t(`tx.type.${kind}`) || kind;
+}
+
+// ---- 取引の一覧（並び順・月ごとの表示） ----
+// 銘柄詳細の取引履歴・手動の取引・取込プレビューで共通。並び順（約定日の古い順／
+// 新しい順）と表示（一覧／月ごと）は、一覧ごとに覚える
+
+function _txListPref(key) {
+  return {
+    order: _loadChoice(`as_tx_order_${key}`, ["asc", "desc"], "asc"),
+    view: _loadChoice(`as_tx_view_${key}`, ["list", "month"], "list"),
+  };
+}
+
+/** 並び順と表示の切替を el に作る。変えると覚えて onChange() を呼ぶ。 */
+function _mountTxViewBar(el, key, onChange) {
+  const groups = [
+    { name: "order", title: "tx.orderLabel", values: [["asc", "tx.orderAsc"], ["desc", "tx.orderDesc"]] },
+    { name: "view", title: "tx.viewLabel", values: [["list", "tx.viewList"], ["month", "tx.viewMonth"]] },
+  ];
+  el.innerHTML = "";
+  groups.forEach((g) => {
+    const box = document.createElement("div");
+    box.className = "range-tabs";
+    box.dataset.name = g.name;
+    box.setAttribute("role", "group");
+    box.setAttribute("data-i18n-title", g.title);
+    box.title = t(g.title);
+    g.values.forEach(([value, label]) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "range-tab";
+      b.dataset.value = value;
+      b.setAttribute("data-i18n", label);
+      b.textContent = t(label);
+      b.addEventListener("click", () => {
+        if (_txListPref(key)[g.name] === value) return;
+        localStorage.setItem(`as_tx_${g.name}_${key}`, value);
+        _syncTxViewBar(el, key);
+        onChange();
+      });
+      box.appendChild(b);
+    });
+    el.appendChild(box);
+  });
+  _syncTxViewBar(el, key);
+}
+
+function _syncTxViewBar(el, key) {
+  const pref = _txListPref(key);
+  el.querySelectorAll(".range-tabs").forEach((box) => {
+    box.querySelectorAll(".range-tab").forEach((b) => {
+      const on = b.dataset.value === pref[box.dataset.name];
+      b.classList.toggle("active", on);
+      b.setAttribute("aria-pressed", String(on));
+    });
+  });
+}
+
+/** 約定日の順に並べる（同じ日は元の順）。新しい順は全体を逆にする（同じ日も後の行が先）。 */
+function _sortTxRows(rows, order, dateOf) {
+  const keyed = rows.map((r, i) => ({ r, i, d: String(dateOf(r) || "") }));
+  keyed.sort((a, b) => (a.d < b.d ? -1 : a.d > b.d ? 1 : a.i - b.i));
+  const out = keyed.map((k) => k.r);
+  return order === "desc" ? out.reverse() : out;
+}
+
+function _fmtMonth(ym) {
+  const m = /^(\d{4})-(\d{2})$/.exec(ym || "");
+  if (!m) return t("tx.noDate");
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  return _lang === "en"
+    ? new Date(Date.UTC(y, mo - 1, 1)).toLocaleString("en-US", {
+      year: "numeric", month: "short", timeZone: "UTC",
+    })
+    : `${y}年${mo}月`;
+}
+
+/** 月の見出しに出す要約: 件数・種類ごとの件数・受渡金額の合計（通貨ごと）。 */
+function _txMonthSummary(rows, { typeOf, amountOf, currencyOf }) {
+  const types = new Map();
+  const sums = new Map();
+  rows.forEach((r) => {
+    const ty = typeOf(r) || "other";
+    types.set(ty, (types.get(ty) || 0) + 1);
+    const raw = amountOf(r);
+    const n = Number(raw);
+    if (raw !== null && raw !== undefined && raw !== "" && isFinite(n)) {
+      const c = currencyOf(r) || "JPY";
+      sums.set(c, (sums.get(c) || 0) + n);
+    }
+  });
+  return {
+    count: t(rows.length === 1 ? "tx.monthCountOne" : "tx.monthCount", { n: rows.length }),
+    types: [...types].map(([ty, n]) => `${txTypeLabel(ty)} ${n}`).join("・"),
+    amount: [...sums].map(([c, v]) => fmtMoney(v, c)).join(" / ") || "—",
+  };
+}
+
+/**
+ * 取引の行を tbody に描く。view が "month" なら月の見出し行の下にまとめ、見出しを
+ * 押す（Enter・Space でも）とその月の行を開閉する。閉じた行も DOM には残す
+ * （取込プレビューは取り込む行をチェックから読む）。
+ *   makeRow(r) → <tr>。monthCells(見出しの HTML, 要約) → 見出し行の <td> 群の HTML
+ *   open: 開いている月（"YYYY-MM"）の Set。描き直しても開いたままにする
+ */
+function _renderTxList(tbody, rows, opts) {
+  const { order, view, dateOf, makeRow, monthCells, open } = opts;
+  tbody.innerHTML = "";
+  const sorted = _sortTxRows(rows, order, dateOf);
+  if (view !== "month") {
+    sorted.forEach((r) => tbody.appendChild(makeRow(r)));
+    return;
+  }
+  const months = [];
+  sorted.forEach((r) => {
+    const ym = String(dateOf(r) || "").slice(0, 7);
+    const last = months[months.length - 1];
+    if (last && last.ym === ym) last.rows.push(r);
+    else months.push({ ym, rows: [r] });
+  });
+  months.forEach(({ ym, rows: members }) => {
+    const head = document.createElement("tr");
+    head.className = "tx-month-row";
+    head.tabIndex = 0;
+    head.title = t("tx.monthToggle");
+    head.innerHTML = monthCells(
+      `<span class="tx-month-chev" aria-hidden="true"></span>${escapeHtml(_fmtMonth(ym))}`,
+      _txMonthSummary(members, opts));
+    const trs = members.map((r) => {
+      const tr = makeRow(r);
+      tr.classList.add("tx-month-member");
+      return tr;
+    });
+    const show = (on) => {
+      head.setAttribute("aria-expanded", String(on));
+      head.querySelector(".tx-month-chev").textContent = on ? "▾" : "▸";
+      trs.forEach((tr) => tr.classList.toggle("hidden", !on));
+    };
+    const toggle = () => {
+      const on = !open.has(ym);
+      if (on) open.add(ym);
+      else open.delete(ym);
+      show(on);
+    };
+    head.addEventListener("click", toggle);
+    head.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        toggle();
+      }
+    });
+    show(open.has(ym));
+    tbody.appendChild(head);
+    trs.forEach((tr) => tbody.appendChild(tr));
+  });
+}
+
+/** 月の見出し行: 見出し・件数と種類・受渡金額の合計を、表の列にそろえて置く。 */
+function _txMonthCells(labelSpan, countSpan, afterAmount) {
+  return (label, s) => `
+    <td class="tx-month-label" colspan="${labelSpan}">${label}</td>
+    <td colspan="${countSpan}">${escapeHtml(s.count)} <span class="tx-month-types">${escapeHtml(s.types)}</span></td>
+    <td class="num">${escapeHtml(s.amount)}</td>
+    ${afterAmount ? `<td colspan="${afterAmount}"></td>` : ""}`;
 }
 
 function coverageLabel(coverage) {
@@ -3401,34 +3834,50 @@ function renderTxRows(rows) {
     tbody.innerHTML = `<tr><td colspan="9" class="muted">${t("label.noData")}</td></tr>`;
     return;
   }
-  rows.forEach((r) => {
-    let status = t("tx.statusNew");
-    // 信用取引は設計上の対象外。「銘柄未確定」「要確認」と出すと対処が要るように
-    // 読めるが、実際にやることは無い。専用の状態にして ⚠ からも外す。
-    const isMargin = !!(r.raw || {}).margin;
-    if (isMargin) status = t("tx.statusMargin");
-    else if (r.cash_only) status = t("tx.statusCashOnly");
-    else if (r.duplicate) status = t("tx.statusDuplicate");
-    else if (r.register_as_new) status = t("tx.statusRegisterSold");
-    else if (r.security_id == null) status = t("tx.statusUnmatched");
-    else if (!r.included) status = t("tx.statusLowConfidence");
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td><input type="checkbox" class="tx-row-check" data-key="${escapeHtml(r.dedup_key)}"${r.included ? " checked" : ""}${r.duplicate ? " disabled" : ""} /></td>
-      <td>${escapeHtml(r.trade_date || "")}</td>
-      <td>${escapeHtml(txTypeLabel(r.tx_type))}</td>
-      <td>${escapeHtml(r.security_name || "")}</td>
-      <td class="num">${fmtAmount(r.quantity)}</td>
-      <td class="num">${fmtPrice(r.unit_price, r.currency)}</td>
-      <td class="num">${fmtMoney(r.net_amount, r.currency)}</td>
-      <td>${escapeHtml(r.lot_label || "")}</td>
-      <td>${escapeHtml(status)}${(() => {
-        const warns = (r.warnings || []).filter((w) => !(isMargin && w.includes("信用取引")));
-        return warns.length ? ` <span class="muted" title="${escapeHtml(warns.join(" / "))}">⚠</span>` : "";
-      })()}</td>
-    `;
-    tbody.appendChild(tr);
+  _renderTxList(tbody, rows, {
+    ..._txListPref("import"),
+    dateOf: (r) => r.trade_date,
+    typeOf: (r) => r.tx_type,
+    amountOf: (r) => r.net_amount,
+    currencyOf: (r) => r.currency,
+    open: _txPreviewOpen,
+    monthCells: _txMonthCells(2, 4, 2),
+    makeRow: _txPreviewRow,
   });
+}
+
+function _txPreviewRow(r) {
+  let status = t("tx.statusNew");
+  // 信用取引は設計上の対象外。「銘柄未確定」「要確認」と出すと対処が要るように
+  // 読めるが、実際にやることは無い。専用の状態にして ⚠ からも外す。
+  const isMargin = !!(r.raw || {}).margin;
+  if (isMargin) status = t("tx.statusMargin");
+  else if (r.cash_only) status = t("tx.statusCashOnly");
+  else if (r.duplicate) status = t("tx.statusDuplicate");
+  else if (r.register_as_new) status = t("tx.statusRegisterSold");
+  else if (r.security_id == null) status = t("tx.statusUnmatched");
+  else if (!r.included) status = t("tx.statusLowConfidence");
+  const tr = document.createElement("tr");
+  tr.innerHTML = `
+    <td><input type="checkbox" class="tx-row-check" data-key="${escapeHtml(r.dedup_key)}"${(r.checked ?? r.included) ? " checked" : ""}${r.duplicate ? " disabled" : ""} /></td>
+    <td>${escapeHtml(r.trade_date || "")}</td>
+    <td>${escapeHtml(txTypeLabel(r.tx_type))}</td>
+    <td>${escapeHtml(r.security_name || "")}</td>
+    <td class="num">${fmtAmount(r.quantity)}</td>
+    <td class="num">${fmtPrice(r.unit_price, r.currency)}</td>
+    <td class="num">${fmtMoney(r.net_amount, r.currency)}</td>
+    <td>${escapeHtml(r.lot_label || "")}</td>
+    <td>${escapeHtml(status)}${(() => {
+      const warns = (r.warnings || []).filter((w) => !(isMargin && w.includes("信用取引")));
+      return warns.length ? ` <span class="muted" title="${escapeHtml(warns.join(" / "))}">⚠</span>` : "";
+    })()}</td>
+  `;
+  // 並べ替え・月ごとの切替で描き直しても、付け外ししたチェックが戻らないよう行に持たせる
+  // （included は取り込めるかの判定で、状態の表示にも使うので書き換えない）
+  tr.querySelector(".tx-row-check").addEventListener("change", (e) => {
+    r.checked = e.target.checked;
+  });
+  return tr;
 }
 
 async function remapTxPreview() {
@@ -3491,6 +3940,7 @@ async function commitTxBatch() {
 
 function resetTxForm() {
   _txPreview = null;
+  _txPreviewOpen.clear();
   _txSecurityMap = {};
   _txNewSecurities = new Set();
   _txAutoLinked = new Set();
@@ -3511,7 +3961,10 @@ document.getElementById("cb-recompute-btn").addEventListener("click", async () =
   note.textContent = "…";
   try {
     const res = await apiCall("/api/cost-basis/recompute", "POST", {});
-    note.textContent = t("tx.recomputeDone", { n: res.groups ?? res.recomputed ?? "" });
+    // 組 = 口座×銘柄。突き合わせられなかった組も再計算の対象には数える
+    note.textContent = t("tx.recomputeDone", {
+      n: (res.reconciled ?? 0) + (res.unreconciled ?? 0),
+    });
     // 表示中の銘柄詳細を読み直す
     if (_secDetailId != null) showSecurityDetail(_secDetailId, _secRange);
   } catch (e) {
@@ -3532,11 +3985,16 @@ function renderCostBasisCard(data, secCur, currency) {
   tbody.innerHTML = "";
   groups.forEach((g) => {
     const tr = document.createElement("tr");
+    // 移管で出ていった口座は、履歴の範囲の代わりに移管先を出す（いまは持っていない）
+    const coverageCell = g.transferred_to
+      ? `<span class="chip chip-ok">${escapeHtml(t("tx.transferredChip"))}</span>
+         <span class="muted">${escapeHtml(t("tx.transferredTo", { to: g.transferred_to, date: g.transferred_on }))}</span>`
+      : coverageBadgeHtml(g.coverage);
     tr.innerHTML = `
       <td>${escapeHtml(g.account || "")}</td>
-      <td>${coverageBadgeHtml(g.coverage)}</td>
-      <td class="num">${fmtAmount(g.covered_quantity)}</td>
-      <td class="num">${fmtAmount(g.residual_quantity)}</td>
+      <td>${coverageCell}</td>
+      <td class="num">${fmtAmount(g.covered_quantity, _secQtyDigits)}</td>
+      <td class="num">${fmtAmount(g.residual_quantity, _secQtyDigits)}</td>
       <td class="num">${fmtPrice(g.residual_avg_cost, secCur)}</td>
       <td>${escapeHtml(g.acquired_on || "—")}</td>
       <td class="num">${plAmountHtml(g.realized_pl, currency)}</td>
@@ -3547,20 +4005,30 @@ function renderCostBasisCard(data, secCur, currency) {
 
   // 「取得単価を再計算した」と言い切れるのは全期間を覆えたときだけ。
   // 部分被覆では逆算の都合で MF と同じ値になるので、そこを正直に書く。
-  const primary = groups[0];
-  const explain = document.getElementById("cb-explain");
-  const key = {
+  // 被覆は口座ごとに違う（手動で登録した口座は全期間、履歴が途中からの口座は
+  // 一部期間など）ので、説明も口座ごとに出す。先頭の口座だけで書くと、他の口座
+  // まで「すべて説明できています」と読めてしまう。全口座が同じ文なら1つにまとめる
+  const explainKeys = {
     full: "tx.explainFull",
     partial: "tx.explainPartial",
     partial_uncosted: "tx.explainPartialUncosted",
     unreconciled: "tx.explainUnreconciled",
-  }[primary.coverage];
-  explain.textContent = key
-    ? t(key, {
-        covered: fmtAmount(primary.covered_quantity),
-        residual: fmtAmount(primary.residual_quantity),
-      })
-    : "";
+  };
+  // 今は持っていない口座（移管・売却で 0）は、いまの保有を説明していないので外す
+  const held = (g) => Number(g.covered_quantity || 0) + Number(g.residual_quantity || 0) > 0;
+  const explains = groups
+    .filter((g) => explainKeys[g.coverage] && !g.transferred_to && held(g))
+    .map((g) => ({
+      account: g.account || "",
+      text: t(explainKeys[g.coverage], {
+        covered: fmtAmount(g.covered_quantity, _secQtyDigits),
+        residual: fmtAmount(g.residual_quantity, _secQtyDigits),
+      }),
+    }));
+  const explain = document.getElementById("cb-explain");
+  explain.innerHTML = explains.every((e) => e.text === explains[0].text)
+    ? escapeHtml(explains.length ? explains[0].text : "")
+    : explains.map((e) => `${escapeHtml(e.account)}: ${escapeHtml(e.text)}`).join("<br>");
 
   const warnings = groups.flatMap((g) => (g.warnings || []).map((w) => w.message));
   renderWarningsInto(document.getElementById("cb-warnings"), warnings);
@@ -3571,36 +4039,78 @@ async function loadTransactionHistory(securityId, secCur, currency, append) {
   const card = document.getElementById("tx-history-card");
   const tbody = document.querySelector("#tx-history-table tbody");
   const more = document.getElementById("tx-history-more");
+  const req = ++_txHistReq;
+  const pref = _txListPref("history");
   if (!append) {
+    if (!_txHistCtx || _txHistCtx.securityId !== securityId) _txHistOpen.clear();
+    _txHistCtx = { securityId, secCur, currency };
     _txHistoryOffset = 0;
-    tbody.innerHTML = "";
   }
-  let data;
-  try {
-    data = await fetchJSON(
-      `/api/securities/${securityId}/transactions?limit=50&offset=${_txHistoryOffset}`);
-  } catch (e) {
-    card.classList.add("hidden");
+  const makeRow = (tx) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${escapeHtml(tx.trade_date)}</td>
+      <td>${escapeHtml(txTypeLabel(tx.tx_type))}${tx.origin === "manual"
+        ? ` <span class="ref-badge" title="${escapeHtml(tx.note || "")}">${t("tx.manualBadge")}</span>` : ""}</td>
+      <td>${escapeHtml(tx.account || "")}</td>
+      <td class="num">${fmtAmount(tx.quantity, _secQtyDigits)}</td>
+      <td class="num">${fmtPrice(tx.unit_price, secCur)}</td>
+      <td class="num">${fmtMoney(tx.net_amount, tx.currency || currency)}</td>
+      <td>${escapeHtml(tx.lot_label || "")}</td>
+    `;
+    return tr;
+  };
+  const url = (limit, offset, order) =>
+    `/api/securities/${securityId}/transactions?limit=${limit}&offset=${offset}&order=${order}`;
+
+  if (pref.view === "month") {
+    // 月ごとは月の合計を出すので全件を読む（ページ送りはしない）
+    let all = [];
+    let total = 0;
+    try {
+      do {
+        const data = await fetchJSON(url(500, all.length, "asc"));
+        if (req !== _txHistReq) return;
+        total = data.total || 0;
+        const got = data.transactions || [];
+        if (!got.length) break;
+        all = all.concat(got);
+      } while (all.length < total);
+    } catch (e) {
+      if (req === _txHistReq) card.classList.add("hidden");
+      return;
+    }
+    card.classList.toggle("hidden", !total);
+    more.classList.add("hidden");
+    _renderTxList(tbody, all, {
+      ...pref,
+      dateOf: (tx) => tx.trade_date,
+      typeOf: (tx) => tx.tx_type,
+      amountOf: (tx) => tx.net_amount,
+      currencyOf: (tx) => tx.currency || currency,
+      open: _txHistOpen,
+      monthCells: _txMonthCells(1, 4, 1),
+      makeRow,
+    });
     return;
   }
+
+  let data;
+  try {
+    data = await fetchJSON(url(50, _txHistoryOffset, pref.order));
+  } catch (e) {
+    if (req === _txHistReq) card.classList.add("hidden");
+    return;
+  }
+  if (req !== _txHistReq) return;
+  if (!append) tbody.innerHTML = "";
   if (!data.total) {
     card.classList.add("hidden");
     return;
   }
   card.classList.remove("hidden");
-  (data.transactions || []).forEach((tx) => {
-    const tr = document.createElement("tr");
-    tr.innerHTML = `
-      <td>${escapeHtml(tx.trade_date)}</td>
-      <td>${escapeHtml(txTypeLabel(tx.tx_type))}</td>
-      <td>${escapeHtml(tx.account || "")}</td>
-      <td class="num">${fmtAmount(tx.quantity)}</td>
-      <td class="num">${fmtPrice(tx.unit_price, secCur)}</td>
-      <td class="num">${fmtMoney(tx.net_amount, tx.currency || currency)}</td>
-      <td>${escapeHtml(tx.lot_label || "")}</td>
-    `;
-    tbody.appendChild(tr);
-  });
+  // 一覧は API の順（約定日の古い順／新しい順）のままページ送りする
+  (data.transactions || []).forEach((tx) => tbody.appendChild(makeRow(tx)));
   _txHistoryOffset += (data.transactions || []).length;
   more.classList.toggle("hidden", _txHistoryOffset >= data.total);
   more.onclick = () => loadTransactionHistory(securityId, secCur, currency, true);
@@ -3691,7 +4201,7 @@ document.getElementById("inbox-scan-btn").addEventListener("click", async () => 
 
 // ---- 手動登録ページ ----
 
-const MANAGE_TABS = ["sec", "cash", "metal", "estate", "crypto", "pension"];
+const MANAGE_TABS = ["sec", "tx", "transfer", "cash", "metal", "estate", "crypto", "pension"];
 
 document.querySelectorAll(".manage-tab").forEach((btn) => {
   btn.addEventListener("click", () => {
@@ -3701,6 +4211,10 @@ document.querySelectorAll(".manage-tab").forEach((btn) => {
       const el = document.getElementById(`manage-tab-${tab}`);
       if (el) el.classList.toggle("hidden", tab !== btn.dataset.tab);
     });
+    // 他のタブで口座・銘柄が増えていることがあるので開くたびに揃える
+    if (btn.dataset.tab === "tx") _syncManualTxSelects();
+    // 移管は取引・記録の全体から判定するので、開くたびに取り直す
+    if (btn.dataset.tab === "transfer") loadTransfers();
   });
 });
 
@@ -3710,9 +4224,25 @@ async function _loadSecuritiesCache() {
   return _securities;
 }
 
-async function loadManagePage() {
+async function loadManagePage(sub, params = {}) {
+  // #manage/transfers のように、開くタブを URL で指定できる（銘柄詳細から来る）。
+  // ?id=<銘柄> を添えると移管タブはその銘柄の行へ移り、取引タブは
+  // ?security=<銘柄>&account=<口座> でその口座・銘柄を選んだ状態で開く
+  const tabKey = { transfers: "transfer" }[sub] || sub;
+  if (tabKey === "transfer") _transferFocusId = Number(params.id) || null;
+  let switched = false;
+  if (tabKey && MANAGE_TABS.includes(tabKey)) {
+    const btn = document.querySelector(`.manage-tab[data-tab="${tabKey}"]`);
+    if (btn && !btn.classList.contains("active")) {
+      btn.click();      // タブを開くときに読み込む
+      switched = true;
+    }
+  }
+  // 移管は銘柄詳細でも決められるので、移管タブを開いたままのページへ戻ったときも取り直す
+  const activeTab = document.querySelector(".manage-tab.active");
+  if (!switched && activeTab && activeTab.dataset.tab === "transfer") loadTransfers();
   // 日付初期値
-  ["nh-as-of", "cash-as-of", "metal-as-of", "re-as-of", "pp-as-of", "re-val-date"].forEach((id) => {
+  ["nh-as-of", "cash-as-of", "metal-as-of", "re-as-of", "pp-as-of", "re-val-date", "mtx-date"].forEach((id) => {
     const el = document.getElementById(id);
     if (el && !el.value) el.value = todayISO();
   });
@@ -3724,7 +4254,11 @@ async function loadManagePage() {
   }
   renderSecuritiesTable();
   _syncSecuritySelects();
+  _syncManualTxSelects();
+  // 銘柄詳細から来たときだけ値を入れる（それ以外で開いたら前の案内を消す）
+  _prefillManualTx(tabKey === "tx" ? params : {});
   loadManageHoldings();
+  loadManualTransactions();
   loadManageClassLists();
   loadCsStatusCard();
 }
@@ -3832,7 +4366,7 @@ function renderManageClassList(tab, classes, holdings, currency) {
     tr.innerHTML =
       `<td>${escapeHtml(h.name)}</td>` +
       `<td>${escapeHtml(h.account || "")}</td>` +
-      `<td class="num">${fmtAmount(h.quantity)}${h.unit === "gram" ? " g" : ""}</td>` +
+      `<td class="num">${fmtAmount(h.quantity, qtyDigits(h.asset_class))}${h.unit === "gram" ? " g" : ""}</td>` +
       `<td class="num">${fmtMoney(h.value, currency)}</td>` +
       `<td>${escapeHtml(h.as_of || "")}</td>`;
     const td = document.createElement("td");
@@ -4303,7 +4837,7 @@ async function loadManageHoldings() {
         <td>${escapeHtml(name)}</td>
         <td>${escapeHtml(account)}</td>
         <td>${escapeHtml(h.lot_label || "")}</td>
-        <td class="num">${fmtAmount(h.quantity)}</td>
+        <td class="num">${fmtAmount(h.quantity, qtyDigits(sec.asset_class))}</td>
         <td class="num">${fmtAmount(h.avg_cost)}</td>
         <td>${escapeHtml(asOf)}</td>
         <td class="num"><button class="delete-btn" title="${t("btn.delete")}">✕ ${t("btn.delete")}</button></td>
@@ -4327,6 +4861,533 @@ async function loadManageHoldings() {
     tbody.innerHTML = `<tr><td colspan="7" class="muted">${t("status.error")}${escapeHtml(e.message)}</td></tr>`;
   }
 }
+
+// ---- 手動の取引（取引履歴をダウンロードできない証券会社のぶん） ----
+
+// 売買という形を取らない資産（残高・記載評価額で持つもの）は選択肢に出さない
+const _NO_TRADE_CLASSES = new Set(["cash", "point", "pension", "real_estate"]);
+
+function _syncManualTxSelects() {
+  const acctSel = document.getElementById("mtx-account");
+  const prevAcct = acctSel.value;
+  acctSel.innerHTML = "";
+  _accounts.forEach((a) => {
+    const opt = document.createElement("option");
+    opt.value = a.id;
+    opt.textContent = a.display_name || a.name;
+    acctSel.appendChild(opt);
+  });
+  if ([...acctSel.options].some((o) => o.value === prevAcct)) acctSel.value = prevAcct;
+
+  const secSel = document.getElementById("mtx-security");
+  const prevSec = secSel.value;
+  secSel.innerHTML = "";
+  _securities.filter((s) => !_NO_TRADE_CLASSES.has(s.asset_class)).forEach((s) => {
+    const opt = document.createElement("option");
+    opt.value = s.id;
+    opt.textContent = s.name + (s.code ? ` (${s.code})` : "");
+    secSel.appendChild(opt);
+  });
+  if ([...secSel.options].some((o) => o.value === prevSec)) secSel.value = prevSec;
+}
+
+/**
+ * 手動登録の取引タブを、登録に要る値を入れた状態で開くリンク（銘柄詳細の注記から）。
+ * security・account・quantity・price・date（約定日の見当）・until（記録の始まる日。
+ * 約定日はこれより前）。値の無いものは付けない。
+ */
+function _manualTxHash(params) {
+  return "#" + buildHash("manage", "tx", params);
+}
+
+/**
+ * 銘柄詳細（破線の注記・移管先の残りの断り）から来たとき、登録に要る値を入れておく。
+ * 口座・銘柄・買付に、遡って描いている数量・単価（取込の平均取得単価など）・約定日
+ * （取込の取得日）が分かっていれば入れ、どこから来た値かを添える。
+ */
+function _prefillManualTx(params) {
+  const box = document.getElementById("mtx-prefill");
+  box.classList.add("hidden");
+  const pick = (id, value) => {
+    const sel = document.getElementById(id);
+    if (value != null && [...sel.options].some((o) => o.value === String(value))) {
+      sel.value = String(value);
+      return true;
+    }
+    return false;
+  };
+  const picked = [pick("mtx-account", params.account), pick("mtx-security", params.security)];
+  if (!picked.some(Boolean)) return;
+  document.getElementById("mtx-type").value = "buy";
+  if (!params.until) return;
+  // 記録より前の買付。約定日が分からなければ空けて入れてもらう（今日のままだと記録の後になる）
+  document.getElementById("mtx-date").value = params.date || "";
+  document.getElementById("mtx-quantity").value = params.quantity || "";
+  document.getElementById("mtx-price").value = params.price || "";
+  document.getElementById("mtx-fee").value = "";
+  hideResult("mtx-result");
+  const sec = _securities.find((s) => String(s.id) === String(params.security)) || {};
+  const acct = document.getElementById("mtx-account");
+  const parts = [t("manage.txPrefill", {
+    name: sec.name || "", account: acct.options[acct.selectedIndex].textContent,
+    until: params.until, qty: fmtAmount(params.quantity, qtyDigits(sec.asset_class)),
+  })];
+  parts.push(t(params.date ? "manage.txPrefillDate" : "manage.txPrefillNoDate"));
+  if (params.price) parts.push(t("manage.txPrefillPrice"));
+  parts.push(t("manage.txPrefillSplit"));
+  box.textContent = parts.join(" ");
+  box.classList.remove("hidden");
+}
+
+// ---- 口座間の移管 ----
+
+function _transferCandidateTags(c) {
+  const tags = [];
+  if (c.quantity_match) tags.push(t("tr.tagQuantity"));
+  if (c.cost_match === true) tags.push(t("tr.tagCost"));
+  if (c.cost_match === false) tags.push(t("tr.tagCostDiffers"));
+  if (c.early) tags.push(t("tr.tagEarly"));
+  if (c.kind === "buy") tags.push(t("tr.tagBuy"));
+  if (c.backdated) tags.push(t("tr.tagBackdated"));
+  return tags;
+}
+
+function _transferQty(securityId, q) {
+  const sec = (_securities || []).find((s) => s.id === securityId);
+  return fmtAmount(q, qtyDigits(sec && sec.asset_class));
+}
+
+function _transferSecurityLink(row) {
+  return `<a href="#holdings/detail?id=${encodeURIComponent(row.security_id)}">${escapeHtml(row.security || "")}</a>`;
+}
+
+/** 移管元の出来事ひとつへの判断を保存する（toAccountId=null は「移管ではない」）。 */
+function _postTransfer(row, toAccountId) {
+  return apiCall("/api/transfers", "POST", {
+    security_id: row.security_id,
+    from_account_id: row.from_account_id,
+    date: row.date,
+    quantity: row.quantity,
+    to_account_id: toAccountId,
+  });
+}
+
+async function _saveTransfer(row, toAccountId) {
+  hideResult("transfer-result");
+  try {
+    await _postTransfer(row, toAccountId);
+    showResult("transfer-result", true,
+      toAccountId == null ? t("tr.savedNotTransfer") : t("tr.savedLinked"));
+  } catch (e) {
+    showResult("transfer-result", false, t("status.error") + e.message);
+  }
+  loadTransfers();
+}
+
+async function _undoTransfer(manualId) {
+  hideResult("transfer-result");
+  try {
+    await apiCall(`/api/transfers/${encodeURIComponent(manualId)}`, "DELETE");
+    showResult("transfer-result", true, t("tr.savedUndone"));
+  } catch (e) {
+    showResult("transfer-result", false, t("status.error") + e.message);
+  }
+  loadTransfers();
+}
+
+/** 付け替え用のセレクト（候補の口座へ結び付け直す・移管ではないとする）。 */
+function _transferChangeSelect(row, candidates, currentTo, withNotTransfer) {
+  const sel = document.createElement("select");
+  sel.className = "settings-input transfer-change";
+  const head = document.createElement("option");
+  head.value = "";
+  head.textContent = t("tr.change");
+  sel.appendChild(head);
+  candidates.filter((c) => c.account_id !== currentTo).forEach((c) => {
+    const opt = document.createElement("option");
+    opt.value = String(c.account_id);
+    const tags = _transferCandidateTags(c);
+    opt.textContent = t("tr.linkTo", { account: c.account }) + (tags.length ? `（${tags.join("・")}）` : "");
+    sel.appendChild(opt);
+  });
+  if (withNotTransfer) {
+    const opt = document.createElement("option");
+    opt.value = "none";
+    opt.textContent = t("tr.notTransfer");
+    sel.appendChild(opt);
+  }
+  sel.addEventListener("change", () => {
+    if (!sel.value) return;
+    _saveTransfer(row, sel.value === "none" ? null : Number(sel.value));
+  });
+  return sel.options.length > 1 ? sel : null;
+}
+
+/**
+ * 自動では決められなかった移管元 1 件（候補の口座のボタンと「移管ではない」）。
+ * 移管タブと銘柄詳細で使う。選ぶと onDecide(移管先の口座 id | null) を呼ぶ。
+ */
+function _transferItem(row, onDecide, { withSecurity = true, fmtQty = null } = {}) {
+  const qty = fmtQty || ((q) => _transferQty(row.security_id, q));
+  const item = document.createElement("div");
+  item.className = "transfer-item";
+  item.dataset.securityId = row.security_id;
+  const how = row.source === "snapshot" ? t("tr.srcSnapshot") : t("tr.srcLedger");
+  item.innerHTML = `
+    <div class="transfer-head">
+      ${withSecurity ? _transferSecurityLink(row) : ""}
+      <span class="${withSecurity ? "muted" : ""}">${escapeHtml(t("tr.outLine", {
+        from: row.from_account, date: row.date, qty: qty(row.quantity), how,
+      }))}</span>
+    </div>
+    <div class="transfer-cands"></div>
+  `;
+  const cands = item.querySelector(".transfer-cands");
+  (row.candidates || []).forEach((c) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "settings-save-btn secondary transfer-cand";
+    const tags = _transferCandidateTags(c);
+    btn.innerHTML = `${escapeHtml(t("tr.linkTo", { account: c.account }))}
+      <span class="transfer-cand-sub">${escapeHtml(c.backdated
+        ? t("tr.candBackdated", { qty: qty(c.quantity) })
+        : t("tr.candLine", { date: c.first_date, qty: qty(c.quantity) })
+      )}${tags.length ? " · " + escapeHtml(tags.join("・")) : ""}</span>`;
+    btn.addEventListener("click", () => onDecide(c.account_id));
+    cands.appendChild(btn);
+  });
+  if (!(row.candidates || []).length) {
+    const p = document.createElement("p");
+    p.className = "muted";
+    p.textContent = t("tr.noCandidates");
+    cands.appendChild(p);
+  }
+  const no = document.createElement("button");
+  no.type = "button";
+  no.className = "delete-btn";
+  no.textContent = t("tr.notTransfer");
+  no.addEventListener("click", () => onDecide(null));
+  cands.appendChild(no);
+  return item;
+}
+
+async function loadTransfers() {
+  const box = document.getElementById("transfer-unresolved");
+  const linksBody = document.querySelector("#transfer-links-table tbody");
+  const dismissedBody = document.querySelector("#transfer-dismissed-table tbody");
+  if (!box) return;
+  box.innerHTML = `<p class="muted">${t("label.loading")}</p>`;
+  let data;
+  try {
+    if (!_securities.length) await _loadSecuritiesCache();
+    data = await fetchJSON("/api/transfers");
+  } catch (e) {
+    box.innerHTML = `<p class="muted">${escapeHtml(t("status.error") + e.message)}</p>`;
+    return;
+  }
+
+  // 自動で決められなかった移管元（候補から選ぶ）
+  box.innerHTML = "";
+  (data.unresolved || []).forEach((row) => {
+    box.appendChild(_transferItem(row, (to) => _saveTransfer(row, to)));
+  });
+  if (!(data.unresolved || []).length) {
+    box.innerHTML = `<p class="muted">${escapeHtml(t("tr.noneUnresolved"))}</p>`;
+  }
+
+  // 結び付けた移管
+  linksBody.innerHTML = "";
+  (data.links || []).forEach((row) => {
+    const tr = document.createElement("tr");
+    tr.dataset.securityId = row.security_id;
+    const how = row.origin === "manual" ? t("tr.manual")
+      : row.cost_match ? t("tr.autoCost") : t("tr.autoQuantity");
+    tr.innerHTML = `
+      <td>${_transferSecurityLink(row)}</td>
+      <td>${escapeHtml(row.from_account)} → ${escapeHtml(row.to_account)}</td>
+      <td>${escapeHtml(row.date)}</td>
+      <td class="num">${_transferQty(row.security_id, row.quantity)}</td>
+      <td>${escapeHtml(how)}</td>
+      <td class="num transfer-actions"></td>
+    `;
+    const actions = tr.querySelector(".transfer-actions");
+    if (row.origin === "manual") {
+      const undo = document.createElement("button");
+      undo.type = "button";
+      undo.className = "delete-btn";
+      undo.textContent = t("tr.undoManual");
+      undo.addEventListener("click", () => _undoTransfer(row.manual_id));
+      actions.appendChild(undo);
+    } else {
+      const sel = _transferChangeSelect(row, row.candidates || [], row.to_account_id, true);
+      if (sel) actions.appendChild(sel);
+    }
+    linksBody.appendChild(tr);
+  });
+  if (!(data.links || []).length) {
+    linksBody.innerHTML = `<tr><td colspan="6" class="muted">${escapeHtml(t("tr.none"))}</td></tr>`;
+  }
+
+  // 移管ではないとした記録（元に戻す・あとから結び付ける）
+  dismissedBody.innerHTML = "";
+  (data.dismissed || []).forEach((row) => {
+    const tr = document.createElement("tr");
+    tr.dataset.securityId = row.security_id;
+    tr.innerHTML = `
+      <td>${_transferSecurityLink(row)}</td>
+      <td>${escapeHtml(row.from_account)}</td>
+      <td>${escapeHtml(row.date)}</td>
+      <td class="num">${_transferQty(row.security_id, row.quantity)}</td>
+      <td class="num transfer-actions"></td>
+    `;
+    const actions = tr.querySelector(".transfer-actions");
+    const sel = _transferChangeSelect(row, row.candidates || [], null, false);
+    if (sel) actions.appendChild(sel);
+    const undo = document.createElement("button");
+    undo.type = "button";
+    undo.className = "delete-btn";
+    undo.textContent = t("tr.undoDismiss");
+    undo.addEventListener("click", () => _undoTransfer(row.manual_id));
+    actions.appendChild(undo);
+    dismissedBody.appendChild(tr);
+  });
+  if (!(data.dismissed || []).length) {
+    dismissedBody.innerHTML = `<tr><td colspan="5" class="muted">${escapeHtml(t("tr.none"))}</td></tr>`;
+  }
+
+  // 銘柄詳細から来たときは、その銘柄の行へ移って目立たせる
+  if (_transferFocusId) {
+    const hits = document.querySelectorAll(
+      `#manage-tab-transfer [data-security-id="${_transferFocusId}"]`);
+    hits.forEach((el) => el.classList.add("transfer-focus"));
+    if (hits.length) hits[0].scrollIntoView({ block: "center" });
+    _transferFocusId = null;
+  }
+}
+
+// ---- 銘柄詳細: 口座間の移管 ----
+
+/**
+ * 結び付いた移管（証券会社を移した履歴）を、口座別内訳の下に小さく添える。
+ * 警告でも対処の要るものでもないので、グラフの下の枠には出さない。誤りに
+ * 気づいたときのために、移管タブ（この銘柄の行）へのリンクを付ける。
+ */
+function renderSecTransferRoute(moves) {
+  const el = document.getElementById("sec-transfer-route");
+  if (!moves.length) {
+    el.innerHTML = "";
+    el.classList.add("hidden");
+    return;
+  }
+  const lines = [...moves]
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0))
+    .map((m) => escapeHtml(t("label.transferNote", {
+      from: m.from_account, to: m.to_account, date: m.date,
+      qty: fmtAmount(m.quantity, _secQtyDigits),
+    })) + (m.origin === "auto"
+      // 全角の括弧（「（自動）」）は前を空けない。英語の「(auto)」は空ける
+      ? (_lang === "en" ? " " : "") + escapeHtml(t("tr.autoShort")) : ""));
+  const manage = "#" + buildHash("manage", "transfers", { id: _secDetailId });
+  el.innerHTML = lines.join("<br>") +
+    `<br><a href="${escapeHtml(manage)}">${escapeHtml(t("label.transferManage"))}</a>`;
+  el.classList.remove("hidden");
+}
+
+// ---- 銘柄詳細: 移管先を決められなかった移管元（移管タブと同じ候補から選ぶ） ----
+
+function renderSecTransferCard(rows) {
+  const list = document.getElementById("sec-transfer-list");
+  list.innerHTML = "";
+  rows.forEach((row) => list.appendChild(_transferItem(
+    row, (to) => _decideTransferInDetail(row, to),
+    { withSecurity: false, fmtQty: (q) => fmtAmount(q, _secQtyDigits) }
+  )));
+  hideResult("sec-transfer-result");
+  document.getElementById("sec-transfer-undo").replaceChildren();
+  // 決め終えたあと（結果と取り消しだけが残る）は、選ぶよう促す見出しにしない
+  _setI18nText(document.getElementById("sec-transfer-title"),
+    rows.length ? "manage.trUnresolvedTitle" : "label.secTransferDoneTitle");
+  document.getElementById("sec-transfer-body").classList.toggle("hidden", !rows.length);
+  document.getElementById("sec-transfer-open").href =
+    "#" + buildHash("manage", "transfers", { id: _secDetailId });
+  document.getElementById("sec-transfer-card").classList.toggle("hidden", !rows.length);
+}
+
+async function _decideTransferInDetail(row, toAccountId) {
+  // 保存して描き直すまで、続けて押せないようにする
+  document.querySelectorAll("#sec-transfer-list button").forEach((b) => { b.disabled = true; });
+  const secId = _secDetailId;
+  let saved = null;
+  let error = null;
+  try {
+    saved = await _postTransfer(row, toAccountId);
+  } catch (e) {
+    error = e;
+  }
+  // 待つ間に別の銘柄へ移っていたら、そちらに結果を出さない
+  if (_secDetailId !== secId) return;
+  // 推移グラフや取得原価の口座の行も、この判断を反映して描き直す
+  await showSecurityDetail(secId);
+  if (_secDetailId !== secId) return;
+  _secTransferOutcome(error == null
+    ? {
+      ok: true,
+      text: toAccountId == null ? t("tr.savedNotTransfer") : t("tr.savedLinked"),
+      undoId: saved && saved.id,
+      dismissed: toAccountId == null,
+    }
+    : { ok: false, text: t("status.error") + error.message });
+}
+
+/** 判断の結果を出す。候補が残っていなくてもカードを残し、その場で取り消せるようにする。 */
+function _secTransferOutcome({ ok, text, undoId = null, dismissed = false }) {
+  document.getElementById("sec-transfer-card").classList.remove("hidden");
+  showResult("sec-transfer-result", ok, text);
+  if (!ok || undoId == null) return;
+  const undo = document.createElement("button");
+  undo.type = "button";
+  undo.className = "delete-btn";
+  undo.textContent = dismissed ? t("tr.undoDismiss") : t("tr.undoManual");
+  undo.addEventListener("click", async () => {
+    undo.disabled = true;
+    const secId = _secDetailId;
+    let error = null;
+    try {
+      await apiCall(`/api/transfers/${encodeURIComponent(undoId)}`, "DELETE");
+    } catch (e) {
+      error = e;
+    }
+    if (_secDetailId !== secId) return;
+    await showSecurityDetail(secId);
+    if (_secDetailId !== secId) return;
+    _secTransferOutcome(error == null
+      ? { ok: true, text: t("tr.savedUndone") }
+      : { ok: false, text: t("status.error") + error.message });
+  });
+  // 結果の帯の中に置くと、帯の色（緑・赤）の上で読みにくいので、下の行に並べる
+  document.getElementById("sec-transfer-undo").replaceChildren(undo);
+}
+
+async function loadManualTransactions() {
+  const tbody = document.querySelector("#manage-tx-table tbody");
+  tbody.innerHTML = `<tr><td colspan="8" class="loading">${t("label.loading")}</td></tr>`;
+  try {
+    const data = await fetchJSON("/api/transactions/manual");
+    _manualTxRows = data.transactions || [];
+    _renderManualTxRows();
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="8" class="muted">${t("status.error")}${escapeHtml(e.message)}</td></tr>`;
+  }
+}
+
+function _renderManualTxRows() {
+  const tbody = document.querySelector("#manage-tx-table tbody");
+  if (!_manualTxRows.length) {
+    tbody.innerHTML = `<tr><td colspan="8" class="muted">${t("manage.txNone")}</td></tr>`;
+    return;
+  }
+  const classById = {};
+  _securities.forEach((s) => { classById[s.id] = s.asset_class; });
+  _renderTxList(tbody, _manualTxRows, {
+    ..._txListPref("manual"),
+    dateOf: (tx) => tx.trade_date,
+    typeOf: (tx) => tx.tx_type,
+    amountOf: (tx) => tx.net_amount,
+    currencyOf: (tx) => tx.currency,
+    open: _manualTxOpen,
+    monthCells: _txMonthCells(1, 5, 1),
+    makeRow: (tx) => {
+      const type = txTypeLabel(tx.tx_type);
+      const qd = qtyDigits(classById[tx.security_id]);
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td>${escapeHtml(tx.trade_date)}</td>
+        <td>${escapeHtml(tx.account || "")}</td>
+        <td>${escapeHtml(tx.security || "")}</td>
+        <td>${escapeHtml(type)}</td>
+        <td class="num">${fmtAmount(tx.quantity, qd)}</td>
+        <td class="num" title="${escapeHtml(tx.note || "")}">${fmtPrice(tx.unit_price, tx.currency)}</td>
+        <td class="num">${fmtMoney(tx.net_amount, tx.currency)}</td>
+        <td class="num"><button class="delete-btn" title="${t("btn.delete")}">✕ ${t("btn.delete")}</button></td>
+      `;
+      tr.querySelector(".delete-btn").addEventListener("click", () => {
+        openConfirmDialog(
+          t("manage.txDeleteTitle"),
+          t("manage.txDeleteMsg", {
+            date: tx.trade_date, account: tx.account || "", name: tx.security || "",
+            type, quantity: fmtAmount(Math.abs(Number(tx.quantity)), qd),
+          }),
+          async () => {
+            await apiCall(`/api/transactions/${encodeURIComponent(tx.id)}`, "DELETE");
+            loadManualTransactions();
+          }
+        );
+      });
+      return tr;
+    },
+  });
+}
+
+// 並び順・表示の切替（一覧ごとに覚える）
+_mountTxViewBar(document.getElementById("tx-history-view"), "history", () => {
+  if (_txHistCtx) loadTransactionHistory(_txHistCtx.securityId, _txHistCtx.secCur, _txHistCtx.currency);
+});
+_mountTxViewBar(document.getElementById("manage-tx-view"), "manual", _renderManualTxRows);
+_mountTxViewBar(document.getElementById("tx-rows-view"), "import",
+  () => renderTxRows((_txPreview && _txPreview.rows) || []));
+
+document.getElementById("mtx-save").addEventListener("click", async () => {
+  hideResult("mtx-result");
+  const acctSel = document.getElementById("mtx-account");
+  const securityId = document.getElementById("mtx-security").value;
+  const tradeDate = document.getElementById("mtx-date").value;
+  const qty = document.getElementById("mtx-quantity").value;
+  if (!acctSel.value || !securityId || !tradeDate || qty === "") {
+    showResult("mtx-result", false, t("status.required"));
+    return;
+  }
+  const body = {
+    account_id: Number(acctSel.value),
+    security_id: Number(securityId),
+    tx_type: document.getElementById("mtx-type").value,
+    trade_date: tradeDate,
+    quantity: qty,
+  };
+  const price = document.getElementById("mtx-price").value;
+  if (price !== "") body.unit_price = price;
+  const fee = document.getElementById("mtx-fee").value;
+  if (fee !== "") body.fee = fee;
+  try {
+    const d = await apiCall("/api/transactions", "POST", body);
+    // 登録できたことに加えて、推移グラフに届いたか（届かないなら理由）を返す
+    const parts = [t("status.addDone")];
+    if (d.price_filled_from) {
+      parts.push(t("manage.txPriceFilled", {
+        date: d.price_filled_from,
+        price: fmtPrice(d.transaction.unit_price, d.transaction.currency),
+      }));
+    }
+    const statusKey = `manage.txStatus.${d.chart_status}`;
+    if (TRANSLATIONS.ja[statusKey] !== undefined) {
+      parts.push(t(statusKey, {
+        account: acctSel.options[acctSel.selectedIndex].textContent,
+        name: (_securities.find((s) => String(s.id) === securityId) || {}).name || "",
+        date: d.first_snapshot || "",
+      }));
+    }
+    showResult("mtx-result", true, parts.join(" "));
+    document.getElementById("mtx-prefill").classList.add("hidden");
+    document.getElementById("mtx-result").classList.toggle(
+      "warn", !["traced", "closed", "no_earlier_trades"].includes(d.chart_status));
+    // 続けて同じ口座・銘柄の別の日を入れやすいよう、数量・単価・手数料だけ空ける
+    ["mtx-quantity", "mtx-price", "mtx-fee"].forEach((id) => {
+      document.getElementById(id).value = "";
+    });
+    loadManualTransactions();
+  } catch (e) {
+    showResult("mtx-result", false, t("status.addFail", { error: e.message }));
+  }
+});
 
 // 既存銘柄の再利用 or 新規作成 → security_id を返す
 async function _findOrCreateSecurity(match, createBody) {
@@ -5165,6 +6226,15 @@ document.getElementById("cs-asset-range-tabs").querySelectorAll(".range-tab").fo
     showCsAssetDetail(_csAssetSym, btn.dataset.range);
   }));
 
+// 表示対象（評価額・保有数）の切替。点列は取得済みなので描き直すだけ
+document.getElementById("cs-asset-metric-tabs").querySelectorAll(".range-tab").forEach((btn) =>
+  btn.addEventListener("click", () => {
+    if (_csAssetSym == null) return;
+    _csAssetMetric = btn.dataset.metric;
+    localStorage.setItem("as_cs_metric", _csAssetMetric);
+    renderCsAssetHistory();
+  }));
+
 document.getElementById("acct-range-tabs").querySelectorAll(".range-tab").forEach((btn) =>
   btn.addEventListener("click", () => loadAcctHistoryChart(null, btn.dataset.range)));
 
@@ -5177,6 +6247,15 @@ document.getElementById("sec-range-tabs").querySelectorAll(".range-tab").forEach
     _secRange = btn.dataset.range;
     localStorage.setItem("as_sec_range", _secRange);
     showSecurityDetail(_secDetailId, _secRange);
+  }));
+
+// 表示対象（価格・評価額・保有数）の切替。ページの残りは描き直さない
+document.getElementById("sec-metric-tabs").querySelectorAll(".range-tab").forEach((btn) =>
+  btn.addEventListener("click", () => {
+    if (_secDetailId == null) return;
+    _secMetric = btn.dataset.metric;
+    localStorage.setItem("as_sec_metric", _secMetric);
+    renderSecurityHistory();
   }));
 
 // ---- 通貨・再取得 ----

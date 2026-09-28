@@ -11,9 +11,10 @@ from asset_summary.importers.txlog.contracts import (
     CONFIDENCE_INCLUDE_THRESHOLD,
     EMPTY_UNIVERSE,
 )
+from asset_summary.importers.txlog.contracts import CanonicalField as F
 from asset_summary.importers.txlog.engine import detect_format, parse_grid
 from asset_summary.importers.txlog.grid import load_grid
-from asset_summary.importers.txlog.vocab import classify_tx_type
+from asset_summary.importers.txlog.vocab import classify_tx_type, header_scores
 from tests.fixtures.tx_grids import (
     FUND_UNIVERSE,
     LAYOUT_A,
@@ -57,6 +58,15 @@ def _parse(text: str, universe=EMPTY_UNIVERSE, encoding: str = "utf-8"):
 )
 def test_tx_type_vocabulary(raw, expected):
     assert classify_tx_type(raw)[0] is expected
+
+
+def test_margin_position_headers_are_not_read_as_the_trade():
+    """建約定金額・建単価は信用の建玉の値。部分一致で約定代金・単価にしない。"""
+    assert header_scores("建約定金額") == {}
+    assert header_scores("建単価") == {}
+    assert header_scores("建約定日") == {}
+    assert F.GROSS_AMOUNT in header_scores("約定金額")
+    assert F.CURRENCY in header_scores("建値通貨")      # 完全一致の同義語はそのまま
 
 
 def test_reinvestment_beats_dividend():
@@ -477,6 +487,67 @@ def test_blank_type_cells_are_inferred_as_buys_when_sell_is_impossible():
     assert all(any("推定" in w for w in t.warnings) for t in blanks)
     # 明記された売却はそのまま
     assert result.transactions[3].tx_type == "sell"
+
+
+# マネックスの取引履歴の形（値はすべて架空）。前文 1 行、25 列の見出し、口座区分や
+# 取引の欄が空欄の行が多い。建〜 の列は信用の建玉の値で、信用の行にしか入らない。
+_MONEX_HEADER = (
+    '"約定日","受渡日","口座","商品","取引","銘柄コード","銘柄名",'
+    '"数量（株/口）/返済数量","単価/返済約定単価","手数料",'
+    '"税金(手数料消費税及び譲渡益税)","利金・分配金・償還金","受渡金額(円)",'
+    '"建約定日","建単価","建約定金額","建手数料","建手数料消費税","事務管理費",'
+    '"名義書換料","順日歩","逆日歩","貸株料","諸経費","備考"'
+)
+
+
+def _monex_csv(*rows: tuple[str, ...]) -> bytes:
+    lines = ["データ作成日：2026/01/31 09:00:00", _MONEX_HEADER]
+    for r in rows:
+        cells = list(r) + [""] * (25 - len(r))
+        lines.append(",".join(f'"{c}"' for c in cells))
+    return csv_bytes(chr(10).join(lines) + chr(10))
+
+
+def _monex_fund_buy(day: str, qty: str, price: str, amount: str) -> tuple[str, ...]:
+    # つみたての買付。取引の欄が空欄で出力される
+    return (day, day, "NISA", "投信", "", "9999", "架空インデックス",
+            qty, price, "0", "0", "0", amount)
+
+
+def test_monex_history_keeps_the_settlement_column_and_infers_blank_buys():
+    """空欄の多い行で見出しを切り詰めず、受渡金額から空欄行の買付を推定できる。
+
+    見出しを「空でないセル数の最頻値」の幅で切っていたため、取引の欄が空欄の
+    つみたて行（空でないセルが 12 個）が多いファイルで 13 列目の「受渡金額(円)」
+    以降が落ち、約定の形を確かめられずに数百行の買付が「確認が必要」に残った。
+    """
+    grid = load_grid(_monex_csv(
+        ("2026/01/05", "2026/01/05", "", "", "ご入金", "", "",
+         "0", "0", "0", "0", "0", "300,000"),
+        _monex_fund_buy("2026/01/06", "5,781", "25,947", "15,000"),
+        _monex_fund_buy("2026/02/06", "5,703", "26,300", "15,000"),
+        _monex_fund_buy("2026/03/06", "5,649", "26,550", "15,000"),
+        _monex_fund_buy("2026/04/06", "5,601", "26,780", "15,000"),
+        ("2026/04/10", "2026/04/14", "特定", "株式", "お買付", "8888", "架空電機",
+         "100", "1,500", "0", "0", "0", "150,000"),
+        # 信用の返済。建約定金額は建玉の金額で、この行の約定代金ではない
+        ("2026/05/12", "2026/05/14", "特定", "信用返済", "半年返済売り", "7777",
+         "架空工業", "100", "2,500", "0", "0", "0", "10,000", "2026/02/10",
+         "2,400", "240,000", "0", "0", "0", "0", "0", "0", "0", "0",
+         "手数料には、建手数料を含む"),
+    ))
+    fmt = detect_format(grid, STOCK_UNIVERSE)
+    assert len(fmt.region.headers) == 25
+    assert fmt.column_for(F.NET_AMOUNT) == 12          # 受渡金額(円)
+    assert fmt.column_for(F.NOTE) == 24                # 備考
+    assert fmt.column_for(F.GROSS_AMOUNT) is None      # 建約定金額を約定代金にしない
+
+    result = parse_grid(grid, STOCK_UNIVERSE, fmt=fmt)
+    funds = [t for t in result.transactions if t.security_name_raw == "架空インデックス"]
+    assert [t.tx_type for t in funds] == ["buy"] * 4
+    assert all(t.raw.get("inferred_type") == "buy" for t in funds)
+    assert funds[0].net_amount == Decimal("-15000")    # 買いは現金が出ていく
+    assert not any("一致しません" in w for w in result.report.warnings)
 
 
 def test_the_proof_extends_to_groups_where_sell_would_be_feasible():
