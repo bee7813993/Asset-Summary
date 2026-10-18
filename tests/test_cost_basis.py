@@ -537,6 +537,37 @@ def test_no_path_without_trades_before_the_first_snapshot():
     assert quantity_paths(txs, snaps) == {}
 
 
+def test_a_buy_on_the_first_snapshot_day_walks_back_when_a_later_day_anchors_it():
+    """買った日が最初の取込の日と同じ（買った日の分を取り込んだのが最初）。
+
+    8/4 にも 8/5 にも 100株あり、約定の無い 8/5 を錨にすれば 8/4 の買付を打ち消せる。
+    8/3 までは「持っていない」で、最初の取込の数量を遡った破線にはならない。
+    """
+    snaps = [_lot(qty="100", as_of="2026-08-04"), _lot(qty="100", as_of="2026-08-05")]
+    txs = [buy("2026-08-04", 100, 1000)]
+    path = quantity_paths(txs, snaps)[(1, 10)]
+    assert path.before == _day("2026-08-04")
+    assert path.opening == D("0")
+    assert path.at(_day("2026-08-03")) == (D("0"), False)
+    assert quantity_path_status(txs, snaps, 1, 10) == "traced"
+
+
+def test_a_buy_on_the_first_snapshot_day_keeps_what_the_morning_import_held():
+    """朝の取込（100株）はその日の買付（100株）を含まず、翌日（200株）に入る。"""
+    snaps = [_lot(qty="100", as_of="2026-08-04"), _lot(qty="200", as_of="2026-08-05")]
+    txs = [buy("2026-08-04", 100, 1000)]
+    path = quantity_paths(txs, snaps)[(1, 10)]
+    assert path.at(_day("2026-08-03")) == (D("100"), True)
+
+
+def test_a_buy_on_the_only_snapshot_day_is_left_unused():
+    """取込がその日だけだと、買付が数量に入っているか決められない（次の取込を待つ）。"""
+    snaps = [_lot(qty="100", as_of="2026-08-04")]
+    txs = [buy("2026-08-04", 100, 1000)]
+    assert quantity_paths(txs, snaps) == {}
+    assert quantity_path_status(txs, snaps, 1, 10) == "no_earlier_trades"
+
+
 def test_no_path_when_lots_start_on_different_days():
     """後から現れたロットが買付か、既存の保有が行を分けただけかは決められない。"""
     snaps = [_lot(qty="100", as_of="2026-08-04"), _lot(lot_seq=1, qty="30", as_of="2026-09-10")]

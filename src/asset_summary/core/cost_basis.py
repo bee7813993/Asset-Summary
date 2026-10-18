@@ -994,8 +994,6 @@ def _group_quantity_path(
         ]
         if extra:
             txs = _ordered([*txs, *extra])
-    if not any(t.trade_date < first for t in txs):
-        return (None, "no_earlier_trades")
 
     # 錨は「その日に約定の無い」最初のスナップショット日。取込の基準日に約定が
     # あると、それがスナップショットに入っているか（夕方の取込）いないか（朝の
@@ -1005,6 +1003,12 @@ def _group_quantity_path(
     anchor = next(
         (d for d in sorted({s.as_of_date for s in snaps}) if d not in trade_days), first
     )
+    # さかのぼる材料は最初の取込より前の約定。最初の取込の日の約定は、その日より後に
+    # 約定の無い取込日（錨が first より後）があるときだけ材料にする — 買った日に初めて
+    # 取り込んだ保有を、翌日以降の取込を錨に「買う前は持っていない」へ戻すため。錨が
+    # first のまま（取込がその日だけ）だと、その約定が取込の数量に入っているか決められない
+    if anchor == first and not any(t.trade_date < first for t in txs):
+        return (None, "no_earlier_trades")
     held = ZERO
     for members in lots.values():
         upto = [s for s in members if s.as_of_date <= anchor]
