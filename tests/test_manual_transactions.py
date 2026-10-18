@@ -157,6 +157,31 @@ def test_chart_status_explains_why_a_trade_is_not_used(client, store, fund):
     assert body["first_snapshot"] is None
 
 
+def test_buy_on_the_first_import_day_ends_the_carried_back_stretch(client, store, fund):
+    """買った日に初めて取り込んだ保有。その買付を登録すると破線（遡及）の案内が消える。"""
+    acct_id, sec_id = fund
+    history = lambda: client.get(  # noqa: E731
+        "/api/portfolio-history", params={"range": "all", "scope": f"security:{sec_id}"}
+    ).json()
+    assert history()["carried_back"]        # 登録前は、取込の数量を遡って描いている
+
+    # 約定の無い翌日の取込があれば、最初の取込の日の買付も数量の錨に使える
+    store.upsert_snapshot(
+        HoldingSnapshot(account_id=acct_id, security_id=sec_id, as_of_date=date(2026, 8, 5),
+                        quantity=D("350000"), avg_cost=D("18000"), origin="mf")
+    )
+    body = _post(client, acct_id, sec_id, trade_date="2026-08-04", quantity="350000",
+                 unit_price="18000").json()
+    assert body["chart_status"] == "traced"
+
+    data = history()
+    assert data["carried_back"] == []
+    pts = {p["t"]: p for p in data["points"]}
+    assert pts["2026-08-03"]["quantity"] == "0"
+    assert pts["2026-08-04"]["quantity"] == "350000"
+    assert not any(p["backfilled"] for p in data["points"])
+
+
 @pytest.mark.parametrize(
     "override, status",
     [
