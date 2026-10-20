@@ -395,6 +395,43 @@ def test_recompute_is_idempotent(seeded):
     assert store.list_cost_basis() == first
 
 
+def test_describe_cost_warnings_keeps_only_the_named_securities(seeded):
+    """統合後の警告は動いた銘柄だけ。売却済み銘柄の通知は件数にまとめる。
+
+    受信フォルダの取込ログに、売り切った銘柄の数だけ同じ文が並んで
+    肝心の警告が埋もれた。どの銘柄・口座の話かも判るようにする。
+    """
+    from asset_summary.core.cost_basis import CostWarning, GroupResult
+
+    def group(account_id, security_id, *warnings):
+        return GroupResult(account_id=account_id, security_id=security_id,
+                           as_of_date=date(2026, 9, 1), warnings=list(warnings))
+
+    closed = CostWarning("CLOSED_POSITION", "スナップショットに無い銘柄です")
+    results = [
+        group(1, 10, CostWarning("TRANSFER_WITHOUT_COST", "入庫に取得価額が無い")),
+        group(2, 10, closed),
+        group(1, 20, closed),      # 対象外: 別銘柄
+        group(1, 30, closed),      # 対象外: 別銘柄
+    ]
+    ledger = [
+        CostWarning("LOT_MIXED_COST", "ロットが混在", {"account_id": 1, "security_id": 10}),
+        CostWarning("LOT_MIXED_COST", "ロットが混在", {"account_id": 1, "security_id": 20}),
+    ]
+    out = tx_service.describe_cost_warnings(
+        results, ledger, security_ids=[10],
+        security_names={10: "架空ファンドA", 20: "架空ファンドB", 30: "架空ファンドC"},
+        account_names={1: "架空証券", 2: "架空ネット銀行"},
+    )
+    assert out == [
+        "架空ファンドA（架空証券）: ロットが混在",
+        "架空ファンドA（架空証券）: 入庫に取得価額が無い",
+        "取込前に売却済みとみなした銘柄が 1 件あります"
+        "（スナップショットに無いため実現損益だけ出します）: 架空ファンドA（架空ネット銀行）",
+    ]
+    assert not any("架空ファンドB" in w or "架空ファンドC" in w for w in out)
+
+
 def test_cost_basis_events_include_the_opening_lot(seeded):
     store, _a, security_id = seeded
     _import(store, _csv(ROW_1, ROW_2, ROW_3))

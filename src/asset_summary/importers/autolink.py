@@ -19,7 +19,7 @@ from ..core import fund_autolink
 from ..core.models import AssetClass, PriceSourceStatus, PriceSourceType, Security
 from ..core.price_history import ensure_price_history
 from ..core.store import Store
-from .tx_service import recompute_cost_basis
+from .tx_service import recompute_for_securities
 
 # 連携できなかった理由の説明（受信フォルダのイベントに書く。画面の i18n と同じ内容）
 REASON_TEXT = {
@@ -46,9 +46,10 @@ def dedupe_linked_funds(store: Store, warnings: list[str]) -> list[dict[str, Any
     取引が移動したら原価を作り直す（holding_cost_basis は派生値なので冪等）。
     """
     merged = fund_autolink.dedupe_same_fund(store, warn=warnings.append)
-    if any(m["transactions"] for m in merged):
+    moved = [m["target_id"] for m in merged if m["transactions"]]
+    if moved:
         try:
-            warnings.extend(recompute_cost_basis(store).get("warnings", []))
+            warnings.extend(recompute_for_securities(store, moved))
         except Exception as e:  # noqa: BLE001 — 統合自体は完了している
             warnings.append(f"取得原価の再計算に失敗しました: {e}")
     return merged
@@ -141,14 +142,16 @@ def autolink_new_funds(
 def describe(autolink: dict[str, Any]) -> str:
     """自動連携の結果を1行の日本語にする（受信フォルダのイベント用）。"""
     parts: list[str] = []
-    linked = len(autolink.get("linked") or [])
+    linked = autolink.get("linked") or []
     if linked:
-        s = f"投信 {linked} 件を投信協会へ自動連携"
-        merged = len(autolink.get("merged") or [])
-        if merged:
-            s += f"、{merged} 件を既存銘柄へ統合"
-        parts.append(s)
+        names = "、".join(f"「{x.get('name')}」" for x in linked)
+        parts.append(f"投信 {len(linked)} 件を投信協会へ自動連携: {names}")
+    for m in autolink.get("merged") or []:
+        # どの新規銘柄がどの既存銘柄に吸収されたかを名前で残す。
+        # 件数だけでは、翌日に銘柄が消えた理由を辿れない。
+        sources = "、".join(f"「{n}」" for n in m.get("merged_names") or [])
+        parts.append(f"{sources} を既存銘柄「{m.get('target_name')}」へ統合")
     for u in autolink.get("unresolved") or []:
         why = REASON_TEXT.get(u.get("reason") or "", u.get("status") or "")
-        parts.append(f"自動連携できず: {u.get('name')}（{why}）")
-    return "、".join(parts)
+        parts.append(f"自動連携できず: 「{u.get('name')}」（{why}）")
+    return " / ".join(parts)
