@@ -273,6 +273,88 @@ def test_split_footer_url_fragment_is_dropped():
     assert not result.report.unparsed_lines
 
 
+def test_footer_url_split_into_short_fragments_is_dropped():
+    """名前の続きが 1 文字ずつ URL に食い込み、URL が 4 語に割れたケース。
+
+    2026-10-20 の実PDF実測: 名前の3行目 'ァ' 'ン' 'ド'（x=53.8 / 60.3 / 66.8,
+    top=816.1）がフッタ URL（top=821.8）に重なり、URL が 'https://m' / 'o' / 'ne' /
+    'yforward.com/bs/portfolio' に割れた。'o' と 'ne' は 4 文字未満なので旧実装では
+    落ちず、名前が「マネックス・ゴールド・ファンドo ne」になって別銘柄として
+    登録された。
+    """
+    words = []
+    words += heading("投資信託", 30)
+    words += total_line("157,650", 40)
+    words += fund_header(50)
+    words += [
+        w("架空・", 53.8, 92.8, 780),
+        w("158,443", 102.6, 130, 780), w("11,211", 150.2, 172, 780),
+        w("9,950", 185.7, 205, 780), w("157,650円", 218, 255, 780),
+        w("-", 272.9, 276, 780), w("-19,970円", 298.9, 335, 780),
+        w("-11.24%", 340.3, 368, 780), w("架空", 375.8, 400, 780),
+    ]
+    words += [w("ゴールド・フ", 53.8, 92.8, 789), w("証券", 375.8, 390, 789)]
+    words += [w("ァ", 53.8, 60.2, 798), w("ン", 60.3, 66.7, 798), w("ド", 66.8, 73.2, 798)]
+    words += [
+        w("https://m", 34.0, 57.0, 803.7), w("o", 57.0, 60.4, 803.7),
+        w("ne", 60.4, 67.0, 803.7), w("yforward.com/bs/portfolio", 67.0, 160, 803.7),
+    ]
+    result = parse_words([words])
+    assert len(result.holdings) == 1
+    assert result.holdings[0].name_raw == "架空・ゴールド・ファンド"
+    assert result.holdings[0].institution == "架空証券"
+    assert not result.report.unparsed_lines
+
+
+def test_footer_url_cut_inside_the_scheme_still_marks_the_line():
+    """URL が 'https:/' で切れると ^https?:// に当たらない。
+
+    2026-10-20 の実PDF 6 ページ目: 見出し「ポイント」が URL に重なり、URL が
+    'https:/' / '/mo' / 'ne' / 'yfo' / 'rwa' / 'r' / 'd.com/bs/portfolio' に割れた。
+    長い断片を行の目印にすれば、短い断片も同じ行として落ちる。
+    """
+    words = []
+    words += heading("投資信託", 30)
+    words += total_line("16,000", 40)
+    words += fund_header(50)
+    words += [
+        w("架空ファンド", 19, 60, 780),
+        w("10,000", 95, 121, 780), w("15,000", 145, 170, 780), w("16,000", 181, 206, 780),
+        w("16,000円", 226, 260, 780), w("0円", 277, 289, 780),
+        w("1,000円", 306, 335, 780), w("6.67%", 354, 378, 780),
+        w("楽天証券", 386, 416, 780),
+    ]
+    words += [
+        w("https:/", 34.0, 50.0, 821.8), w("/mo", 50.3, 57.5, 821.8), w("ne", 60.4, 67.0, 821.8),
+        w("yfo", 67.0, 75.0, 821.8), w("rwa", 75.0, 84.0, 821.8), w("r", 84.7, 86.0, 821.8),
+        w("d.com/bs/portfolio", 86.7, 160, 821.8),
+    ]
+    result = parse_words([words])
+    assert len(result.holdings) == 1
+    assert result.holdings[0].name_raw == "架空ファンド"
+    assert not result.report.unparsed_lines
+
+
+def test_short_ascii_name_fragment_off_the_url_line_is_kept():
+    """URL と同じ高さでなければ、短い ASCII 語は銘柄名の一部として残す。"""
+    words = []
+    words += heading("投資信託", 30)
+    words += total_line("16,000", 40)
+    words += fund_header(50)
+    words += [
+        w("架空ファンド", 19, 60, 780),
+        w("10,000", 95, 121, 780), w("15,000", 145, 170, 780), w("16,000", 181, 206, 780),
+        w("16,000円", 226, 260, 780), w("0円", 277, 289, 780),
+        w("1,000円", 306, 335, 780), w("6.67%", 354, 378, 780),
+        w("楽天証券", 386, 416, 780),
+    ]
+    words += [w("one", 19, 30, 789)]
+    words += [w("https://moneyforward.com/bs/portfolio", 34, 160, 811)]
+    result = parse_words([words])
+    assert len(result.holdings) == 1
+    assert result.holdings[0].name_raw == "架空ファンドone"
+
+
 def test_page_chrome_does_not_leak_into_names():
     result = parse_words(_page_chrome_doc())
     assert len(result.holdings) == 1
