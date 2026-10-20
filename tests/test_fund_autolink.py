@@ -591,6 +591,69 @@ def test_import_autolinks_new_fund_and_merges_into_existing(store: Store, monkey
     assert store.get_security(keep) is not None
 
 
+def test_dedupe_after_import_reports_only_the_merged_fund(store: Store):
+    """統合後の原価再計算で出る警告は、統合した銘柄の分だけログに残す。
+
+    台帳には取込前に売り切った銘柄が何十件もあり、その全部の通知が
+    毎回の取込ログに流れていた。
+    """
+    from asset_summary.core.models import ImportBatch, Transaction
+    from asset_summary.importers import autolink as al
+
+    keep = _seed_linked_fund(store, "架空ファンドA", "JP1:001", account="架空証券")
+    dup = _seed_linked_fund(store, "架空ファンドA(証券会社表記)", "JP1:001",
+                            account="架空ネット銀行")
+    # 取込前に売り切った無関係の銘柄（スナップショット無し・取引だけ残る）
+    gone = store.create_security(Security(
+        name="架空売却済みファンド", name_key="売却済み", asset_class=AssetClass.FUND_JP,
+        unit=Unit.KUCHI, price_unit_divisor=10000))
+    acct = store.get_or_create_account("架空ネット銀行")
+    store.create_batch(ImportBatch(id="tx-1", source_kind="broker_csv"))
+    store.insert_transactions([
+        Transaction(dedup_key="k1", account_id=acct.id, security_id=dup,
+                    trade_date=date(2026, 7, 1), tx_type="buy", quantity=D("10000"),
+                    unit_price=D("10000"), gross_amount=D("10000")),
+        Transaction(dedup_key="k2", account_id=acct.id, security_id=gone,
+                    trade_date=date(2026, 7, 1), tx_type="buy", quantity=D("10000"),
+                    unit_price=D("10000"), gross_amount=D("10000")),
+        Transaction(dedup_key="k3", account_id=acct.id, security_id=gone,
+                    trade_date=date(2026, 8, 1), tx_type="sell", quantity=D("-10000"),
+                    unit_price=D("11000"), gross_amount=D("11000")),
+    ], batch_id="tx-1")
+
+    warnings: list[str] = []
+    merged = al.dedupe_linked_funds(store, warnings)
+
+    target = merged[0]["target_id"]
+    assert {target, merged[0]["merged_ids"][0]} == {keep, dup}
+    assert store.get_security(merged[0]["merged_ids"][0]) is None
+    assert not any("架空売却済みファンド" in w for w in warnings)
+    assert all("架空ファンドA" in w for w in warnings)      # どの銘柄の話か判る
+    # 全体の再計算ではその銘柄の通知が出る（台帳自体は変えていない）
+    from asset_summary.importers.tx_service import recompute_cost_basis
+    assert any("スナップショットに無い銘柄" in w
+               for w in recompute_cost_basis(store)["warnings"])
+
+
+def test_describe_names_what_was_merged_into_what():
+    """統合の結果は件数ではなく、どの新規銘柄がどの既存銘柄に入ったかを残す。"""
+    from asset_summary.importers import autolink as al
+
+    text = al.describe({
+        "linked": [{"security_id": 7, "name": "架空ファンドA(証券会社表記)", "ref": "JP1:001"}],
+        "merged": [{"target_id": 3, "target_name": "架空ファンドA",
+                    "merged_ids": [7], "merged_names": ["架空ファンドA(証券会社表記)"],
+                    "transactions": 1}],
+        "unresolved": [{"security_id": 8, "name": "架空未知ファンド",
+                        "status": "unavailable", "reason": "search_unreachable"}],
+    })
+    assert text == (
+        "投信 1 件を投信協会へ自動連携: 「架空ファンドA(証券会社表記)」"
+        " / 「架空ファンドA(証券会社表記)」 を既存銘柄「架空ファンドA」へ統合"
+        " / 自動連携できず: 「架空未知ファンド」（投信協会へ照会できませんでした（通信エラー））"
+    )
+
+
 def test_import_autolink_records_reason_when_it_cannot_link(store: Store, monkeypatch):
     """連携できなかったときは理由を添えて返す（協会へ届かないケース）。"""
     from asset_summary.importers import autolink as al

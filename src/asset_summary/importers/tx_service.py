@@ -23,7 +23,7 @@ import re
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, Iterable, Sequence
 
 from ..core.cost_basis import CostWarning, GroupResult, reconcile_all
 from ..core.models import (
@@ -1603,19 +1603,24 @@ def _dec(value: Any) -> Decimal | None:
 # ----------------------------------------------------------------------
 
 
+def _reconcile_store(
+    store: Store, batch_id: str | None
+) -> tuple[list[GroupResult], list[CostWarning], dict[int, Security]]:
+    transactions = store.list_transactions()
+    lots = store.current_holdings()
+    securities = store.securities_by_id()
+    results, warnings = reconcile_all(transactions, lots, securities)
+    store.replace_cost_basis([_cost_basis_row(r) for r in results], batch_id=batch_id)
+    return (results, warnings, securities)
+
+
 def recompute_cost_basis(store: Store, batch_id: str | None = None) -> dict[str, Any]:
     """台帳とスナップショットを突き合わせ、取得原価を書き直す。
 
     holding_cost_basis は transactions から常に再生成できる派生値なので、
     いつ呼んでも冪等。バッチの巻き戻し後にも呼べばよい。
     """
-    transactions = store.list_transactions()
-    lots = store.current_holdings()
-    securities = store.securities_by_id()
-    results, warnings = reconcile_all(transactions, lots, securities)
-
-    rows = [_cost_basis_row(r) for r in results]
-    store.replace_cost_basis(rows, batch_id=batch_id)
+    results, warnings, _ = _reconcile_store(store, batch_id)
 
     reconciled = sum(1 for r in results if r.coverage is not Coverage.UNRECONCILED)
     return {
@@ -1625,6 +1630,74 @@ def recompute_cost_basis(store: Store, batch_id: str | None = None) -> dict[str,
         "warnings": [w.message for w in warnings]
         + [w.message for r in results for w in r.warnings],
     }
+
+
+def recompute_for_securities(store: Store, security_ids: Iterable[int]) -> list[str]:
+    """統合などで取引が動いたあとの再計算。警告は動いた銘柄の分だけ返す。
+
+    原価は派生値なので台帳全体を作り直す点は recompute_cost_basis と同じ。
+    ただし全銘柄の警告をそのまま返すと、取込前に売り切った銘柄の通知が
+    何十件も並び、対処の要る数件が埋もれる（受信フォルダの取込ログで
+    実際に起きた）。返す警告は security_ids の口座×銘柄に限り、どの銘柄の
+    話か判るよう銘柄名と口座名を添える。
+    """
+    results, ledger, securities = _reconcile_store(store, None)
+    accounts = {a.id: a.display_name or a.name for a in store.list_accounts()}
+    return describe_cost_warnings(
+        results, ledger,
+        security_ids=security_ids,
+        security_names={sid: sec.name for sid, sec in securities.items()},
+        account_names=accounts,
+    )
+
+
+def describe_cost_warnings(
+    results: Sequence[GroupResult],
+    ledger_warnings: Sequence[CostWarning],
+    *,
+    security_ids: Iterable[int],
+    security_names: dict[int, str],
+    account_names: dict[int, str],
+) -> list[str]:
+    """突合の警告を、対象銘柄に絞って読める文にする。
+
+    「取込前に売却済みとみなした」（CLOSED_POSITION）は異常ではなく、
+    スナップショットに無い銘柄ごとに必ず 1 件出る情報なので、1 行の件数に
+    まとめて銘柄名を列挙する。それ以外は 1 件ずつ「銘柄（口座）: 内容」。
+    """
+    wanted = set(security_ids)
+
+    def label(account_id: int, security_id: int) -> str:
+        sec = security_names.get(security_id) or f"銘柄 #{security_id}"
+        acct = account_names.get(account_id) or f"口座 #{account_id}"
+        return f"{sec}（{acct}）"
+
+    out: list[str] = []
+    for w in ledger_warnings:
+        sid = w.values.get("security_id")
+        if sid is not None and sid not in wanted:
+            continue
+        aid = w.values.get("account_id")
+        if sid is not None and aid is not None:
+            out.append(f"{label(aid, sid)}: {w.message}")
+        else:
+            out.append(w.message)
+
+    closed: list[str] = []
+    for r in results:
+        if r.security_id not in wanted:
+            continue
+        for w in r.warnings:
+            if w.code == "CLOSED_POSITION":
+                closed.append(label(r.account_id, r.security_id))
+            else:
+                out.append(f"{label(r.account_id, r.security_id)}: {w.message}")
+    if closed:
+        out.append(
+            f"取込前に売却済みとみなした銘柄が {len(closed)} 件あります"
+            f"（スナップショットに無いため実現損益だけ出します）: " + "、".join(closed)
+        )
+    return out
 
 
 def _cost_basis_row(r: GroupResult) -> dict[str, Any]:

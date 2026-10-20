@@ -96,6 +96,7 @@ from ..importers.tx_service import (
     commit_tx_batch,
     cost_basis_events,
     recompute_cost_basis,
+    recompute_for_securities,
     remap_tx_preview,
 )
 from . import auth as as_auth
@@ -1556,7 +1557,7 @@ def create_app(db_path: str = "data/assets.db") -> FastAPI:
         # 取引が移ったら原価を作り直す（holding_cost_basis は派生値なので冪等）
         if result["transactions"]:
             try:
-                warnings.extend(recompute_cost_basis(store).get("warnings", []))
+                warnings.extend(recompute_for_securities(store, [security_id]))
             except Exception as e:  # noqa: BLE001 — 統合自体は完了している
                 warnings.append(f"取得原価の再計算に失敗しました: {e}")
         # source から価格ソースを引き継いだ場合は履歴もその場で取得しておく
