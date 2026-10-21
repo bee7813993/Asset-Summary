@@ -152,17 +152,33 @@ _FOOTER_MARKERS = (
 # - フッタのURL: 左端＝名称列に落ちる
 _PAGE_CHROME_WORD_RE = re.compile(r"^ヘルプ[・･]?サポー.*ト$|^https?://")
 # フッタのURL本文。改ページで銘柄名の続きがこの行に重なると、pdfplumber がURLを
-# 重なった位置で2語に割る（'https://m' + 'oneyforward.com/bs/portfolio'）。後ろ半分は
+# 重なった位置で割る（'https://m' + 'oneyforward.com/bs/portfolio'）。後ろ半分は
 # https:// で始まらないので、URLの部分文字列（ASCII 4文字以上）も装飾として落とす。
 # 和文の銘柄名はASCIIでないので当たらず、英数字の銘柄語（ETF/REIT/DC など）は
 # このURLの部分文字列にならない。
+#
+# 名前の続きが 1 文字ずつ URL に食い込むと、URL は 'https://m' / 'o' / 'ne' /
+# 'yforward.com/bs/portfolio' のように 4 語以上に割れ、1〜2 文字の断片が残る
+# （2026-10-20 の実PDF。銘柄名が「…ファンドo ne」になった）。短い断片は
+# 4 文字の下限では落とせないので、'https://' の語と同じ高さにある ASCII の
+# URL 部分文字列は長さを問わず落とす。名前の文字は別の行高にあるので当たらない。
 _FOOTER_URL = "https://moneyforward.com/bs/portfolio"
+_URL_LINE_TOLERANCE = 1.5     # 同じ行とみなす top の差(pt)
 
 
-def _is_page_chrome(norm: str) -> bool:
-    if _PAGE_CHROME_WORD_RE.search(norm):
-        return True
+def _is_footer_url_part(norm: str) -> bool:
+    """URL の長い断片。単独で装飾と判り、同じ行の短い断片を落とす目印にもなる。
+
+    'https:/' のようにスラッシュの途中で切れると ^https?:// には当たらないが、
+    4 文字以上の部分文字列なのでこちらで拾える。
+    """
     return len(norm) >= 4 and norm.isascii() and norm in _FOOTER_URL
+
+
+def _is_page_chrome(norm: str, *, on_url_line: bool = False) -> bool:
+    if _PAGE_CHROME_WORD_RE.search(norm) or _is_footer_url_part(norm):
+        return True
+    return on_url_line and norm.isascii() and norm in _FOOTER_URL
 # ページ冒頭の日時見出し（例 '2026/08/24 16:37 マネーフォワード ME'）は行単位で無視する
 _PAGE_HEADER_RE = re.compile(
     r"^\d{4}/\d{1,2}/\d{1,2}\s+\d{1,2}:\d{2}\s+マネーフォワード\s*ME$"
@@ -643,13 +659,19 @@ class _Parser:
 
 def _filter_words(words: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """ノイズ単語の除去（ページ共通の装飾・円グラフ二重文字ラベル）。"""
+    url_tops = [
+        float(w["top"]) for w in words if _is_footer_url_part(nfkc(str(w["text"])))
+    ]
     out = []
     for w in words:
         text = _strip_pua(str(w["text"])).strip()
         if not text:
             continue
         norm = nfkc(text)
-        if _is_page_chrome(norm):
+        on_url_line = any(
+            abs(float(w["top"]) - t) <= _URL_LINE_TOLERANCE for t in url_tops
+        )
+        if _is_page_chrome(norm, on_url_line=on_url_line):
             continue
         if _is_doubled_label(norm):
             continue
